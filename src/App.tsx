@@ -1,24 +1,32 @@
 import { useEffect, useMemo, useState, useTransition } from "react";
 import {
+  AlertCircle,
   Bell,
   Bookmark,
   CheckCircle2,
   Compass,
+  Copy,
   Feather,
   Hash,
   Home,
   KeyRound,
   Loader2,
   RadioTower,
+  RefreshCw,
+  Save,
   Search,
   Settings,
   ShieldCheck,
+  Trash2,
   UserRound,
+  X,
 } from "lucide-react";
 import "./App.css";
 import {
   DEFAULT_SETTINGS,
+  fetchSignerEvents,
   fetchTrendingFeed,
+  isSignerRegistered,
   type HypersnapCast,
 } from "./lib/hypersnap";
 import {
@@ -43,6 +51,30 @@ const navItems = [
   { label: "Profile", icon: UserRound },
   { label: "Settings", icon: Settings },
 ];
+
+const DRAFTS_STORAGE_KEY = "castora-desktop:drafts";
+
+type SignerStatusState = "idle" | "checking" | "registered" | "unregistered" | "error";
+
+type SignerStatus = {
+  state: SignerStatusState;
+  eventCount: number;
+  message: string;
+  checkedAt?: string;
+};
+
+type SavedDraft = {
+  id: string;
+  text: string;
+  createdAt: string;
+  fid: number | null;
+};
+
+const emptySignerStatus: SignerStatus = {
+  state: "idle",
+  eventCount: 0,
+  message: "Create or import a local desktop signer.",
+};
 
 const fallbackCasts: HypersnapCast[] = [
   {
@@ -78,6 +110,8 @@ function App() {
   const [privateKeyInput, setPrivateKeyInput] = useState("");
   const [writeResult, setWriteResult] = useState("");
   const [settingsDraft, setSettingsDraft] = useState<DesktopSettings>(DEFAULT_SETTINGS);
+  const [signerStatus, setSignerStatus] = useState<SignerStatus>(emptySignerStatus);
+  const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>([]);
   const [isPending, startTransition] = useTransition();
 
   const castValidation = useMemo(() => validateCastText(composeText), [composeText]);
@@ -110,6 +144,19 @@ function App() {
   }, []);
 
   useEffect(() => {
+    try {
+      const rawDrafts = window.localStorage.getItem(DRAFTS_STORAGE_KEY);
+      const parsedDrafts = rawDrafts ? JSON.parse(rawDrafts) : [];
+
+      if (Array.isArray(parsedDrafts)) {
+        setSavedDrafts(parsedDrafts.filter(isSavedDraft).slice(0, 12));
+      }
+    } catch {
+      setSavedDrafts([]);
+    }
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function loadFeed() {
@@ -135,18 +182,79 @@ function App() {
     };
   }, [settings.nodeBaseUrl]);
 
+  useEffect(() => {
+    if (!account) {
+      setSignerStatus(emptySignerStatus);
+      return;
+    }
+
+    void checkSignerReadiness(account);
+  }, [account?.fid, account?.publicKeyHex, settings.nodeBaseUrl]);
+
   async function persistSettings() {
     const saved = await saveSettings(settingsDraft);
     setSettings(saved);
     setSettingsDraft(saved);
   }
 
+  function persistDrafts(nextDrafts: SavedDraft[]) {
+    const cappedDrafts = nextDrafts.slice(0, 12);
+    setSavedDrafts(cappedDrafts);
+    window.localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(cappedDrafts));
+  }
+
+  async function checkSignerReadiness(
+    targetAccount = account,
+    nodeBaseUrl = settings.nodeBaseUrl,
+  ) {
+    if (!targetAccount) {
+      setSignerStatus(emptySignerStatus);
+      return false;
+    }
+
+    setSignerStatus({
+      state: "checking",
+      eventCount: 0,
+      message: "Checking signer approval on Hypersnap.",
+    });
+
+    try {
+      const events = await fetchSignerEvents(nodeBaseUrl, targetAccount.fid);
+      const registered = isSignerRegistered(events, targetAccount.publicKeyHex);
+
+      setSignerStatus({
+        state: registered ? "registered" : "unregistered",
+        eventCount: events.length,
+        checkedAt: new Date().toISOString(),
+        message: registered
+          ? "This desktop signer is approved for writes."
+          : "This local signer is not approved on KeyRegistry yet.",
+      });
+
+      return registered;
+    } catch (error) {
+      setSignerStatus({
+        state: "error",
+        eventCount: 0,
+        checkedAt: new Date().toISOString(),
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
   async function handleCreateSigner() {
     const fid = Number(fidInput);
     const nextAccount = await createSigner(fid);
+    const savedSettings = await saveSettings({ ...settings, selectedFid: fid });
     setAccount(nextAccount);
-    setSettings(await saveSettings({ ...settings, selectedFid: fid }));
+    setSettings(savedSettings);
     setSettingsDraft((current) => ({ ...current, selectedFid: fid }));
+    setSignerStatus({
+      state: "unregistered",
+      eventCount: 0,
+      message: "Created locally. Approve this signer before submitting writes.",
+    });
     setWriteResult(
       `Created local desktop signer ${nextAccount.publicKeyHex.slice(0, 18)}... for FID ${fid}. Approve this signer before submitting writes.`,
     );
@@ -155,18 +263,56 @@ function App() {
   async function handleImportSigner() {
     const fid = Number(fidInput);
     const nextAccount = await importSigner(fid, privateKeyInput);
+    const savedSettings = await saveSettings({ ...settings, selectedFid: fid });
     setAccount(nextAccount);
     setPrivateKeyInput("");
-    setSettings(await saveSettings({ ...settings, selectedFid: fid }));
+    setSettings(savedSettings);
     setSettingsDraft((current) => ({ ...current, selectedFid: fid }));
     setWriteResult(`Imported signer for FID ${fid}.`);
+    void checkSignerReadiness(nextAccount, savedSettings.nodeBaseUrl);
   }
 
   async function handleDeleteSigner() {
     if (!activeFid) return;
     await deleteSigner(activeFid);
     setAccount(null);
+    setSignerStatus(emptySignerStatus);
     setWriteResult(`Deleted local signer for FID ${activeFid}.`);
+  }
+
+  function handleSaveDraft() {
+    if (composeText.trim().length === 0) {
+      setWriteResult("Write something before saving a draft.");
+      return;
+    }
+
+    const nextDraft: SavedDraft = {
+      id: crypto.randomUUID(),
+      text: composeText,
+      createdAt: new Date().toISOString(),
+      fid: activeFid,
+    };
+
+    const dedupedDrafts = savedDrafts.filter(
+      (draft) => draft.text.trim() !== composeText.trim(),
+    );
+    persistDrafts([nextDraft, ...dedupedDrafts]);
+    setWriteResult("Saved draft locally.");
+  }
+
+  function handleLoadDraft(draft: SavedDraft) {
+    setComposeText(draft.text);
+    setWriteResult("Loaded draft.");
+  }
+
+  function handleDeleteDraft(id: string) {
+    persistDrafts(savedDrafts.filter((draft) => draft.id !== id));
+    setWriteResult("Deleted draft.");
+  }
+
+  function handleClearCompose() {
+    setComposeText("");
+    setWriteResult("Cleared compose box.");
   }
 
   async function handleDryRun() {
@@ -193,6 +339,11 @@ function App() {
   async function handleSubmit() {
     if (!activeFid) {
       setWriteResult("Add or import a signer before submitting a message.");
+      return;
+    }
+
+    if (signerStatus.state !== "registered") {
+      setWriteResult("Signer must be approved on KeyRegistry before submitting.");
       return;
     }
 
@@ -268,7 +419,7 @@ function App() {
                   ? "Loading Hypersnap..."
                   : feedStatus === "error"
                     ? "Showing local fallback"
-                    : "Trending on Hypersnap"}
+                    : "Live Hypersnap feed"}
               </p>
             </div>
             <div className="hidden items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-500 sm:flex">
@@ -283,9 +434,12 @@ function App() {
               composeText={composeText}
               isPending={isPending}
               setComposeText={setComposeText}
+              signerStatus={signerStatus}
               startTransition={startTransition}
               validation={castValidation}
+              onClear={handleClearCompose}
               onDryRun={handleDryRun}
+              onSaveDraft={handleSaveDraft}
               onSubmit={handleSubmit}
             />
 
@@ -305,8 +459,17 @@ function App() {
             setFidInput={setFidInput}
             setPrivateKeyInput={setPrivateKeyInput}
             onCreateSigner={handleCreateSigner}
+            onCheckSigner={() => checkSignerReadiness(account)}
             onImportSigner={handleImportSigner}
             onDeleteSigner={handleDeleteSigner}
+            signerStatus={signerStatus}
+            setWriteResult={setWriteResult}
+          />
+
+          <DraftsPanel
+            drafts={savedDrafts}
+            onDeleteDraft={handleDeleteDraft}
+            onLoadDraft={handleLoadDraft}
           />
 
           <SettingsPanel
@@ -335,21 +498,30 @@ function Composer({
   composeText,
   isPending,
   setComposeText,
+  signerStatus,
   startTransition,
   validation,
+  onClear,
   onDryRun,
+  onSaveDraft,
   onSubmit,
 }: {
   activeFid: number | null;
   composeText: string;
   isPending: boolean;
   setComposeText: (value: string) => void;
+  signerStatus: SignerStatus;
   startTransition: (callback: () => void) => void;
   validation: ReturnType<typeof validateCastText>;
+  onClear: () => void;
   onDryRun: () => Promise<void>;
+  onSaveDraft: () => void;
   onSubmit: () => Promise<void>;
 }) {
   const [busyAction, setBusyAction] = useState<"dry" | "submit" | null>(null);
+  const dryRunDisabled = isPending || busyAction !== null || !activeFid || !validation.valid;
+  const submitDisabled =
+    dryRunDisabled || signerStatus.state !== "registered";
 
   async function run(action: "dry" | "submit") {
     setBusyAction(action);
@@ -373,19 +545,35 @@ function Composer({
             {activeFid ? `Signing as FID ${activeFid}` : "No signer selected"}
           </p>
         </div>
-        <span
-          className={cn(
-            "rounded-md px-2.5 py-1 text-xs font-bold",
-            validation.valid ? "bg-moss/15 text-emerald-700" : "bg-ember/15 text-red-700",
-          )}
-        >
-          {composeText.length}/320
-        </span>
+        <div className="flex items-center gap-2">
+          <span
+            className={cn(
+              "rounded-md px-2.5 py-1 text-xs font-bold",
+              signerStatusClasses(signerStatus.state),
+            )}
+          >
+            {signerStatusLabel(signerStatus.state)}
+          </span>
+          <span
+            className={cn(
+              "rounded-md px-2.5 py-1 text-xs font-bold",
+              validation.valid ? "bg-moss/15 text-emerald-700" : "bg-ember/15 text-red-700",
+            )}
+          >
+            {composeText.length}/320
+          </span>
+        </div>
       </div>
 
       <textarea
         className="min-h-24 w-full resize-none rounded-md border border-slate-200 bg-slate-50 p-3 text-sm leading-6 outline-none transition focus:border-snap focus:bg-white"
         value={composeText}
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+            event.preventDefault();
+            if (!dryRunDisabled) void run("dry");
+          }
+        }}
         onChange={(event) => {
           const value = event.currentTarget.value;
           startTransition(() => setComposeText(value));
@@ -394,13 +582,32 @@ function Composer({
 
       <div className="mt-3 flex items-center justify-between gap-3">
         <p className="text-xs font-medium text-slate-500">
-          {validation.valid ? "Ready to sign." : validation.reason}
+          {validation.valid ? signerStatus.message : validation.reason}
         </p>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <button
             className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
             type="button"
-            disabled={isPending || busyAction !== null}
+            disabled={busyAction !== null || composeText.trim().length === 0}
+            onClick={onSaveDraft}
+          >
+            <Save className="h-4 w-4" aria-hidden="true" />
+            Save
+          </button>
+          <button
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+            type="button"
+            aria-label="Clear compose"
+            title="Clear compose"
+            disabled={busyAction !== null || composeText.length === 0}
+            onClick={onClear}
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+          <button
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+            type="button"
+            disabled={dryRunDisabled}
             onClick={() => run("dry")}
           >
             {busyAction === "dry" ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
@@ -409,7 +616,7 @@ function Composer({
           <button
             className="inline-flex h-9 items-center gap-2 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
             type="button"
-            disabled={isPending || busyAction !== null}
+            disabled={submitDisabled}
             onClick={() => run("submit")}
           >
             {busyAction === "submit" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Feather className="h-4 w-4" />}
@@ -470,8 +677,11 @@ function AccountPanel({
   setFidInput,
   setPrivateKeyInput,
   onCreateSigner,
+  onCheckSigner,
   onImportSigner,
   onDeleteSigner,
+  signerStatus,
+  setWriteResult,
 }: {
   account: DesktopAccount | null;
   fidInput: string;
@@ -479,12 +689,20 @@ function AccountPanel({
   setFidInput: (value: string) => void;
   setPrivateKeyInput: (value: string) => void;
   onCreateSigner: () => Promise<void>;
+  onCheckSigner: () => Promise<boolean>;
   onImportSigner: () => Promise<void>;
   onDeleteSigner: () => Promise<void>;
+  signerStatus: SignerStatus;
+  setWriteResult: (value: string) => void;
 }) {
-  const [busy, setBusy] = useState<"create" | "import" | "delete" | null>(null);
+  const [busy, setBusy] = useState<"create" | "import" | "delete" | "check" | null>(
+    null,
+  );
 
-  async function run(action: "create" | "import" | "delete", callback: () => Promise<void>) {
+  async function run(
+    action: "create" | "import" | "delete" | "check",
+    callback: () => Promise<unknown>,
+  ) {
     setBusy(action);
     try {
       await callback();
@@ -506,6 +724,25 @@ function AccountPanel({
             FID {account.fid}
           </span>
         ) : null}
+      </div>
+
+      <div
+        className={cn(
+          "mb-3 flex items-start gap-2 rounded-md px-3 py-2 text-xs font-semibold",
+          signerStatusClasses(signerStatus.state),
+        )}
+      >
+        {signerStatus.state === "registered" ? (
+          <CheckCircle2 className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />
+        ) : signerStatus.state === "checking" ? (
+          <Loader2 className="mt-0.5 h-4 w-4 flex-none animate-spin" aria-hidden="true" />
+        ) : (
+          <AlertCircle className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />
+        )}
+        <div>
+          <p>{signerStatusLabel(signerStatus.state)}</p>
+          <p className="mt-0.5 font-medium opacity-80">{signerStatus.message}</p>
+        </div>
       </div>
 
       <label className="block text-xs font-bold text-slate-500" htmlFor="fid">
@@ -553,7 +790,44 @@ function AccountPanel({
 
       {account ? (
         <div className="mt-3 rounded-md bg-slate-50 p-3">
-          <p className="text-xs font-bold text-slate-500">Signer public key</p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs font-bold text-slate-500">Signer public key</p>
+            <div className="flex gap-1">
+              <button
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                type="button"
+                aria-label="Copy signer public key"
+                title="Copy signer public key"
+                disabled={busy !== null}
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(account.publicKeyHex);
+                    setWriteResult("Copied signer public key.");
+                  } catch (error) {
+                    setWriteResult(
+                      error instanceof Error ? error.message : "Unable to copy signer key.",
+                    );
+                  }
+                }}
+              >
+                <Copy className="h-4 w-4" aria-hidden="true" />
+              </button>
+              <button
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                type="button"
+                aria-label="Check signer approval"
+                title="Check signer approval"
+                disabled={busy !== null || signerStatus.state === "checking"}
+                onClick={() => run("check", onCheckSigner)}
+              >
+                {busy === "check" || signerStatus.state === "checking" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                )}
+              </button>
+            </div>
+          </div>
           <p className="mt-1 break-all font-mono text-xs text-slate-700">{account.publicKeyHex}</p>
           <button
             className="mt-3 h-8 rounded-md border border-red-200 bg-white px-3 text-xs font-bold text-red-700 hover:bg-red-50"
@@ -565,6 +839,66 @@ function AccountPanel({
           </button>
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function DraftsPanel({
+  drafts,
+  onDeleteDraft,
+  onLoadDraft,
+}: {
+  drafts: SavedDraft[];
+  onDeleteDraft: (id: string) => void;
+  onLoadDraft: (draft: SavedDraft) => void;
+}) {
+  return (
+    <section className="mt-4 rounded-md border border-slate-200 bg-white p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm font-bold">
+          <Bookmark className="h-4 w-4 text-ember" aria-hidden="true" />
+          Drafts
+        </div>
+        <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-bold text-slate-500">
+          {drafts.length}
+        </span>
+      </div>
+
+      {drafts.length === 0 ? (
+        <p className="rounded-md bg-slate-50 p-3 text-xs font-medium leading-5 text-slate-500">
+          Saved casts will appear here.
+        </p>
+      ) : (
+        <ol className="divide-y divide-slate-100">
+          {drafts.slice(0, 6).map((draft) => (
+            <li key={draft.id} className="py-3 first:pt-0 last:pb-0">
+              <button
+                className="block w-full rounded-md text-left hover:bg-slate-50"
+                type="button"
+                onClick={() => onLoadDraft(draft)}
+              >
+                <p className="max-h-10 overflow-hidden px-2 pt-2 text-sm font-semibold leading-5 text-slate-800">
+                  {draft.text}
+                </p>
+              </button>
+              <div className="mt-2 flex items-center justify-between gap-2 px-2">
+                <span className="text-xs font-medium text-slate-500">
+                  {draft.fid ? `FID ${draft.fid}` : "No FID"} · {formatDraftDate(draft.createdAt)}
+                </span>
+                <button
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 hover:bg-red-50 hover:text-red-700"
+                  type="button"
+                  aria-label="Delete draft"
+                  title="Delete draft"
+                  onClick={() => onDeleteDraft(draft.id)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
     </section>
   );
 }
@@ -625,6 +959,65 @@ function SettingsPanel({
       </button>
     </section>
   );
+}
+
+function signerStatusLabel(state: SignerStatusState) {
+  switch (state) {
+    case "registered":
+      return "Registered";
+    case "checking":
+      return "Checking";
+    case "unregistered":
+      return "Needs approval";
+    case "error":
+      return "Check failed";
+    case "idle":
+    default:
+      return "No signer";
+  }
+}
+
+function signerStatusClasses(state: SignerStatusState) {
+  switch (state) {
+    case "registered":
+      return "bg-moss/15 text-emerald-700";
+    case "checking":
+      return "bg-snap/15 text-cyan-700";
+    case "unregistered":
+      return "bg-amber-100 text-amber-800";
+    case "error":
+      return "bg-ember/15 text-red-700";
+    case "idle":
+    default:
+      return "bg-slate-100 text-slate-600";
+  }
+}
+
+function isSavedDraft(value: unknown): value is SavedDraft {
+  if (!value || typeof value !== "object") return false;
+
+  const draft = value as Partial<SavedDraft>;
+  return (
+    typeof draft.id === "string" &&
+    typeof draft.text === "string" &&
+    typeof draft.createdAt === "string" &&
+    (typeof draft.fid === "number" || draft.fid === null)
+  );
+}
+
+function formatDraftDate(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Unknown";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }
 
 export default App;

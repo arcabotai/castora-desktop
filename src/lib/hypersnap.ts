@@ -24,8 +24,22 @@ export type HypersnapCast = {
   replies: { count: number };
 };
 
+export type HypersnapSignerEvent = {
+  fid: number;
+  signer_key: string;
+  key_type: number;
+  metadata_type: number;
+  block_number: number;
+  block_timestamp: number;
+};
+
 type FeedResponse = {
   casts?: HypersnapCast[];
+  next?: { cursor?: string | null };
+};
+
+type SignersResponse = {
+  events?: HypersnapSignerEvent[];
   next?: { cursor?: string | null };
 };
 
@@ -80,4 +94,24 @@ export async function fetchFollowingFeed(nodeBaseUrl: string, fid: number) {
   );
 
   return response.casts ?? [];
+}
+
+export async function fetchSignerEvents(nodeBaseUrl: string, fid: number) {
+  const response = await hypersnapGet<SignersResponse>(nodeBaseUrl, "/v2/farcaster/signer", {
+    fid,
+  });
+
+  return response.events ?? [];
+}
+
+export function isSignerRegistered(
+  signerEvents: HypersnapSignerEvent[],
+  publicKeyHex: string,
+) {
+  const expected = normalizeSignerKey(publicKeyHex);
+  return signerEvents.some((event) => normalizeSignerKey(event.signer_key) === expected);
+}
+
+export function normalizeSignerKey(key: string) {
+  return key.trim().toLowerCase().replace(/^0x/, "");
 }
