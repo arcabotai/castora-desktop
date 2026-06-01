@@ -9,9 +9,9 @@ and designed to move to Windows once the read/write spine is stable.
 - Castora-style desktop layout with feed, compose, account, and network panels.
 - Hypersnap read client defaulting to `https://haatz.quilibrium.com`.
 - Local signer commands backed by the OS keychain.
-- Phase 0 write spike: build a signed Farcaster cast message with
-  `@farcaster/core`, keep the private key in Rust/keychain, and submit raw
-  message bytes through a Tauri command.
+- Phase 0 write spike: build a signed Farcaster cast message with a small
+  CastAdd protobuf encoder, keep the private key in Rust/keychain, and submit
+  raw message bytes through a Tauri command.
 
 ## Development
 
