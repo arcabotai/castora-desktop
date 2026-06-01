@@ -46,7 +46,12 @@ export async function hypersnapGet<T>(
     }
   }
 
-  const response = await fetch(url);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 8000);
+
+  const response = await fetch(url, { signal: controller.signal }).finally(() => {
+    window.clearTimeout(timeout);
+  });
 
   if (!response.ok) {
     throw new Error(`Hypersnap request failed with HTTP ${response.status}`);
@@ -56,7 +61,8 @@ export async function hypersnapGet<T>(
 }
 
 export async function fetchTrendingFeed(nodeBaseUrl: string) {
-  const response = await hypersnapGet<FeedResponse>(nodeBaseUrl, "/v2/farcaster/feed/trending", {
+  const response = await hypersnapGet<FeedResponse>(nodeBaseUrl, "/v2/farcaster/feed", {
+    fid: 3,
     limit: 20,
   });
 
