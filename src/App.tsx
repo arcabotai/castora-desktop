@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState, useTransition } from "react";
 import {
   AlertCircle,
+  ArrowRight,
   Bell,
   Bookmark,
   BookmarkCheck,
   CheckCircle2,
+  CircleDot,
   Compass,
   Copy,
   Feather,
@@ -12,6 +14,7 @@ import {
   Heart,
   Home,
   KeyRound,
+  ListChecks,
   Loader2,
   MessageCircle,
   RadioTower,
@@ -58,6 +61,7 @@ const navItems = [
 
 const DRAFTS_STORAGE_KEY = "castora-desktop:drafts";
 const BOOKMARKS_STORAGE_KEY = "castora-desktop:bookmarks";
+const FIRST_CAST_STORAGE_KEY = "castora-desktop:first-cast-complete";
 
 type SignerStatusState = "idle" | "checking" | "registered" | "unregistered" | "error";
 
@@ -74,6 +78,15 @@ type SavedDraft = {
   createdAt: string;
   fid: number | null;
 };
+
+type SetupStepStatus = "done" | "current" | "pending" | "blocked";
+
+type PrimaryOnboardingAction =
+  | { kind: "focus-fid"; label: string; disabled: boolean }
+  | { kind: "create-signer"; label: string; disabled: boolean }
+  | { kind: "check-signer"; label: string; disabled: boolean }
+  | { kind: "focus-compose"; label: string; disabled: boolean }
+  | { kind: "complete"; label: string; disabled: boolean };
 
 const emptySignerStatus: SignerStatus = {
   state: "idle",
@@ -119,10 +132,13 @@ function App() {
   const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>([]);
   const [bookmarkedCastHashes, setBookmarkedCastHashes] = useState<string[]>([]);
   const [selectedCastHash, setSelectedCastHash] = useState<string | null>(null);
+  const [firstCastSubmitted, setFirstCastSubmitted] = useState(false);
   const [isPending, startTransition] = useTransition();
 
   const castValidation = useMemo(() => validateCastText(composeText), [composeText]);
   const activeFid = account?.fid ?? settings.selectedFid ?? null;
+  const parsedFidInput = Number(fidInput);
+  const fidCandidate = activeFid ?? (parsedFidInput > 0 ? parsedFidInput : null);
   const selectedCast = useMemo(
     () => casts.find((cast) => cast.hash === selectedCastHash) ?? casts[0] ?? null,
     [casts, selectedCastHash],
@@ -165,6 +181,10 @@ function App() {
     } catch {
       setSavedDrafts([]);
     }
+  }, []);
+
+  useEffect(() => {
+    setFirstCastSubmitted(window.localStorage.getItem(FIRST_CAST_STORAGE_KEY) === "true");
   }, []);
 
   useEffect(() => {
@@ -376,6 +396,10 @@ function App() {
     setWriteResult("Cleared compose box.");
   }
 
+  function focusField(id: string) {
+    document.getElementById(id)?.focus();
+  }
+
   async function handleDryRun() {
     if (!activeFid) {
       setWriteResult("Add or import a signer before building a message.");
@@ -418,6 +442,10 @@ function App() {
       text: composeText,
     });
     const result = await submitRawMessage(settings.hubSubmitUrl, signed.encodedMessageHex);
+    if (result.ok) {
+      setFirstCastSubmitted(true);
+      window.localStorage.setItem(FIRST_CAST_STORAGE_KEY, "true");
+    }
     setWriteResult(
       `Submitted ${signed.hashHex.slice(0, 18)}... with HTTP ${result.status}: ${result.body.slice(0, 180)}`,
     );
@@ -521,6 +549,19 @@ function App() {
         </section>
 
         <aside className="scrollbar-subtle h-auto overflow-y-auto bg-slate-50 px-5 py-5 lg:h-screen">
+          <OnboardingPanel
+            account={account}
+            feedStatus={feedStatus}
+            fidCandidate={fidCandidate}
+            firstCastSubmitted={firstCastSubmitted}
+            signerStatus={signerStatus}
+            onCheckSigner={() => checkSignerReadiness(account)}
+            onCreateSigner={handleCreateSigner}
+            onFocusCompose={() => focusField("compose-text")}
+            onFocusFid={() => focusField("fid")}
+            onReport={setWriteResult}
+          />
+
           <CastDetailPanel
             cast={selectedCast}
             isBookmarked={
@@ -648,6 +689,7 @@ function Composer({
       </div>
 
       <textarea
+        id="compose-text"
         className="min-h-24 w-full resize-none rounded-md border border-slate-200 bg-slate-50 p-3 text-sm leading-6 outline-none transition focus:border-snap focus:bg-white"
         value={composeText}
         onKeyDown={(event) => {
@@ -706,6 +748,169 @@ function Composer({
           </button>
         </div>
       </div>
+    </section>
+  );
+}
+
+function OnboardingPanel({
+  account,
+  feedStatus,
+  fidCandidate,
+  firstCastSubmitted,
+  signerStatus,
+  onCheckSigner,
+  onCreateSigner,
+  onFocusCompose,
+  onFocusFid,
+  onReport,
+}: {
+  account: DesktopAccount | null;
+  feedStatus: "idle" | "loading" | "ready" | "error";
+  fidCandidate: number | null;
+  firstCastSubmitted: boolean;
+  signerStatus: SignerStatus;
+  onCheckSigner: () => Promise<boolean>;
+  onCreateSigner: () => Promise<void>;
+  onFocusCompose: () => void;
+  onFocusFid: () => void;
+  onReport: (message: string) => void;
+}) {
+  const [busyAction, setBusyAction] = useState<"create" | "check" | null>(null);
+  const steps = [
+    {
+      title: "Live feed",
+      detail:
+        feedStatus === "ready"
+          ? "Hypersnap reads are online."
+          : feedStatus === "error"
+            ? "Using local fallback while the node recovers."
+            : "Connecting to Hypersnap.",
+      done: feedStatus === "ready",
+    },
+    {
+      title: "Existing FID",
+      detail: fidCandidate ? `FID ${fidCandidate} selected.` : "Choose the identity to use.",
+      done: fidCandidate !== null,
+    },
+    {
+      title: "Desktop signer",
+      detail: account?.hasSigner ? "Signer is stored locally." : "Create or import a local signer.",
+      done: Boolean(account?.hasSigner),
+    },
+    {
+      title: "Approval",
+      detail: signerStatus.message,
+      done: signerStatus.state === "registered",
+    },
+    {
+      title: "First cast",
+      detail: firstCastSubmitted ? "First desktop cast sent." : "Write, sign, and submit.",
+      done: firstCastSubmitted,
+    },
+  ];
+  const firstOpenStep = steps.findIndex((step) => !step.done);
+  const completedCount = steps.filter((step) => step.done).length;
+  const primaryAction = getOnboardingPrimaryAction({
+    account,
+    fidCandidate,
+    firstCastSubmitted,
+    signerStatus,
+  });
+
+  async function runPrimaryAction() {
+    if (primaryAction.kind === "focus-fid") {
+      onFocusFid();
+      return;
+    }
+
+    if (primaryAction.kind === "focus-compose") {
+      onFocusCompose();
+      return;
+    }
+
+    if (primaryAction.kind === "complete") {
+      onFocusCompose();
+      return;
+    }
+
+    const action = primaryAction.kind === "create-signer" ? "create" : "check";
+    setBusyAction(action);
+
+    try {
+      if (primaryAction.kind === "create-signer") {
+        await onCreateSigner();
+      } else {
+        await onCheckSigner();
+      }
+    } catch (error) {
+      onReport(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  return (
+    <section className="mb-4 rounded-md border border-slate-200 bg-white p-4">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-bold">
+            <ListChecks className="h-4 w-4 text-snap" aria-hidden="true" />
+            First cast setup
+          </div>
+          <p className="mt-1 text-xs font-medium text-slate-500">
+            {completedCount}/{steps.length} ready
+          </p>
+        </div>
+        <span
+          className={cn(
+            "rounded-md px-2 py-1 text-xs font-bold",
+            firstCastSubmitted ? "bg-moss/15 text-emerald-700" : "bg-slate-100 text-slate-600",
+          )}
+        >
+          {firstCastSubmitted ? "Ready" : "Setup"}
+        </span>
+      </div>
+
+      <ol className="space-y-2">
+        {steps.map((step, index) => {
+          const status = getSetupStepStatus(step.done, index, firstOpenStep);
+          return (
+            <li
+              key={step.title}
+              className={cn(
+                "flex gap-2 rounded-md border px-3 py-2",
+                setupStepClasses(status),
+              )}
+            >
+              <SetupStepIcon status={status} />
+              <div className="min-w-0">
+                <p className="text-xs font-bold">{step.title}</p>
+                <p className="mt-0.5 text-xs font-medium leading-4 opacity-75">
+                  {step.detail}
+                </p>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+
+      <button
+        className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+        type="button"
+        disabled={primaryAction.disabled || busyAction !== null}
+        onClick={runPrimaryAction}
+      >
+        {busyAction ? (
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+        ) : (
+          <ArrowRight className="h-4 w-4" aria-hidden="true" />
+        )}
+        {busyAction === "create"
+          ? "Creating..."
+          : busyAction === "check"
+            ? "Checking..."
+            : primaryAction.label}
+      </button>
     </section>
   );
 }
@@ -1223,6 +1428,81 @@ function SettingsPanel({
       </button>
     </section>
   );
+}
+
+function SetupStepIcon({ status }: { status: SetupStepStatus }) {
+  if (status === "done") {
+    return <CheckCircle2 className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />;
+  }
+
+  if (status === "current") {
+    return <CircleDot className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />;
+  }
+
+  if (status === "blocked") {
+    return <AlertCircle className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />;
+  }
+
+  return <CircleDot className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />;
+}
+
+function getSetupStepStatus(
+  done: boolean,
+  index: number,
+  firstOpenStep: number,
+): SetupStepStatus {
+  if (done) return "done";
+  if (index === firstOpenStep) return "current";
+  if (firstOpenStep === -1 || index < firstOpenStep) return "pending";
+  return "blocked";
+}
+
+function setupStepClasses(status: SetupStepStatus) {
+  switch (status) {
+    case "done":
+      return "border-emerald-100 bg-moss/10 text-emerald-700";
+    case "current":
+      return "border-cyan-100 bg-snap/10 text-cyan-800";
+    case "blocked":
+      return "border-slate-100 bg-slate-50 text-slate-400";
+    case "pending":
+    default:
+      return "border-slate-100 bg-slate-50 text-slate-600";
+  }
+}
+
+function getOnboardingPrimaryAction({
+  account,
+  fidCandidate,
+  firstCastSubmitted,
+  signerStatus,
+}: {
+  account: DesktopAccount | null;
+  fidCandidate: number | null;
+  firstCastSubmitted: boolean;
+  signerStatus: SignerStatus;
+}): PrimaryOnboardingAction {
+  if (!fidCandidate) {
+    return { kind: "focus-fid", label: "Enter existing FID", disabled: false };
+  }
+
+  if (!account?.hasSigner) {
+    return { kind: "create-signer", label: "Create local signer", disabled: false };
+  }
+
+  if (signerStatus.state !== "registered") {
+    return {
+      kind: "check-signer",
+      label: signerStatus.state === "checking" ? "Checking approval" : "Check approval",
+      disabled: signerStatus.state === "checking",
+    };
+  }
+
+  if (!firstCastSubmitted) {
+    return { kind: "focus-compose", label: "Compose first cast", disabled: false };
+  }
+
+  return { kind: "complete", label: "Write another cast", disabled: false };
 }
 
 function signerStatusLabel(state: SignerStatusState) {
