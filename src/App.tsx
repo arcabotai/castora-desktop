@@ -3,16 +3,20 @@ import {
   AlertCircle,
   Bell,
   Bookmark,
+  BookmarkCheck,
   CheckCircle2,
   Compass,
   Copy,
   Feather,
   Hash,
+  Heart,
   Home,
   KeyRound,
   Loader2,
+  MessageCircle,
   RadioTower,
   RefreshCw,
+  Repeat2,
   Save,
   Search,
   Settings,
@@ -53,6 +57,7 @@ const navItems = [
 ];
 
 const DRAFTS_STORAGE_KEY = "castora-desktop:drafts";
+const BOOKMARKS_STORAGE_KEY = "castora-desktop:bookmarks";
 
 type SignerStatusState = "idle" | "checking" | "registered" | "unregistered" | "error";
 
@@ -112,10 +117,16 @@ function App() {
   const [settingsDraft, setSettingsDraft] = useState<DesktopSettings>(DEFAULT_SETTINGS);
   const [signerStatus, setSignerStatus] = useState<SignerStatus>(emptySignerStatus);
   const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>([]);
+  const [bookmarkedCastHashes, setBookmarkedCastHashes] = useState<string[]>([]);
+  const [selectedCastHash, setSelectedCastHash] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const castValidation = useMemo(() => validateCastText(composeText), [composeText]);
   const activeFid = account?.fid ?? settings.selectedFid ?? null;
+  const selectedCast = useMemo(
+    () => casts.find((cast) => cast.hash === selectedCastHash) ?? casts[0] ?? null,
+    [casts, selectedCastHash],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -157,6 +168,21 @@ function App() {
   }, []);
 
   useEffect(() => {
+    try {
+      const rawBookmarks = window.localStorage.getItem(BOOKMARKS_STORAGE_KEY);
+      const parsedBookmarks = rawBookmarks ? JSON.parse(rawBookmarks) : [];
+
+      if (Array.isArray(parsedBookmarks)) {
+        setBookmarkedCastHashes(
+          parsedBookmarks.filter((value): value is string => typeof value === "string"),
+        );
+      }
+    } catch {
+      setBookmarkedCastHashes([]);
+    }
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function loadFeed() {
@@ -191,6 +217,17 @@ function App() {
     void checkSignerReadiness(account);
   }, [account?.fid, account?.publicKeyHex, settings.nodeBaseUrl]);
 
+  useEffect(() => {
+    if (casts.length === 0) {
+      setSelectedCastHash(null);
+      return;
+    }
+
+    if (!selectedCastHash || !casts.some((cast) => cast.hash === selectedCastHash)) {
+      setSelectedCastHash(casts[0].hash);
+    }
+  }, [casts, selectedCastHash]);
+
   async function persistSettings() {
     const saved = await saveSettings(settingsDraft);
     setSettings(saved);
@@ -201,6 +238,30 @@ function App() {
     const cappedDrafts = nextDrafts.slice(0, 12);
     setSavedDrafts(cappedDrafts);
     window.localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(cappedDrafts));
+  }
+
+  function persistBookmarks(nextHashes: string[]) {
+    const uniqueHashes = Array.from(new Set(nextHashes)).slice(0, 100);
+    setBookmarkedCastHashes(uniqueHashes);
+    window.localStorage.setItem(BOOKMARKS_STORAGE_KEY, JSON.stringify(uniqueHashes));
+  }
+
+  function handleToggleBookmark(cast: HypersnapCast) {
+    const isBookmarked = bookmarkedCastHashes.includes(cast.hash);
+    const nextHashes = isBookmarked
+      ? bookmarkedCastHashes.filter((hash) => hash !== cast.hash)
+      : [cast.hash, ...bookmarkedCastHashes];
+
+    persistBookmarks(nextHashes);
+    setSelectedCastHash(cast.hash);
+    setWriteResult(isBookmarked ? "Removed bookmark." : "Bookmarked cast locally.");
+  }
+
+  function handleStartReply(cast: HypersnapCast) {
+    const handle = cast.author.username ? `@${cast.author.username}` : `fid:${cast.author.fid}`;
+    setSelectedCastHash(cast.hash);
+    setComposeText(`${handle} `);
+    setWriteResult("Reply draft started locally.");
   }
 
   async function checkSignerReadiness(
@@ -445,13 +506,34 @@ function App() {
 
             <ol className="divide-y divide-slate-200">
               {casts.map((cast) => (
-                <CastRow key={cast.hash} cast={cast} />
+                <CastRow
+                  key={cast.hash}
+                  cast={cast}
+                  isBookmarked={bookmarkedCastHashes.includes(cast.hash)}
+                  isSelected={selectedCast?.hash === cast.hash}
+                  onBookmark={() => handleToggleBookmark(cast)}
+                  onReply={() => handleStartReply(cast)}
+                  onSelect={() => setSelectedCastHash(cast.hash)}
+                />
               ))}
             </ol>
           </div>
         </section>
 
         <aside className="scrollbar-subtle h-auto overflow-y-auto bg-slate-50 px-5 py-5 lg:h-screen">
+          <CastDetailPanel
+            cast={selectedCast}
+            isBookmarked={
+              selectedCast ? bookmarkedCastHashes.includes(selectedCast.hash) : false
+            }
+            onBookmark={() => {
+              if (selectedCast) handleToggleBookmark(selectedCast);
+            }}
+            onReply={() => {
+              if (selectedCast) handleStartReply(selectedCast);
+            }}
+          />
+
           <AccountPanel
             account={account}
             fidInput={fidInput}
@@ -628,14 +710,44 @@ function Composer({
   );
 }
 
-function CastRow({ cast }: { cast: HypersnapCast }) {
-  const displayName = cast.author.display_name || cast.author.username || `FID ${cast.author.fid}`;
-  const username = cast.author.username ? `@${cast.author.username}` : `fid:${cast.author.fid}`;
+function CastRow({
+  cast,
+  isBookmarked,
+  isSelected,
+  onBookmark,
+  onReply,
+  onSelect,
+}: {
+  cast: HypersnapCast;
+  isBookmarked: boolean;
+  isSelected: boolean;
+  onBookmark: () => void;
+  onReply: () => void;
+  onSelect: () => void;
+}) {
+  const displayName = getCastDisplayName(cast);
+  const username = getCastUsername(cast);
   const avatarLetter = displayName.slice(0, 1).toUpperCase();
 
   return (
-    <li className="px-6 py-4 transition hover:bg-slate-50">
-      <article className="flex gap-3">
+    <li
+      className={cn(
+        "px-6 py-4 transition hover:bg-slate-50",
+        isSelected && "bg-slate-50 shadow-[inset_3px_0_0_#17c4d8]",
+      )}
+    >
+      <article
+        className="flex cursor-pointer gap-3 outline-none"
+        role="button"
+        tabIndex={0}
+        onClick={onSelect}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect();
+          }
+        }}
+      >
         {cast.author.pfp_url ? (
           <img
             className="h-11 w-11 flex-none rounded-md object-cover"
@@ -659,14 +771,166 @@ function CastRow({ cast }: { cast: HypersnapCast }) {
           <p className="whitespace-pre-wrap break-words text-[15px] leading-6 text-slate-900">
             {cast.text}
           </p>
-          <div className="mt-3 flex gap-5 text-xs font-semibold text-slate-500">
-            <span>{cast.replies.count} replies</span>
-            <span>{cast.reactions.likes_count} likes</span>
-            <span>{cast.reactions.recasts_count} recasts</span>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
+            <span className="inline-flex items-center gap-1 rounded-md px-1.5 py-1">
+              <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
+              {cast.replies.count}
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-md px-1.5 py-1">
+              <Heart className="h-3.5 w-3.5" aria-hidden="true" />
+              {cast.reactions.likes_count}
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-md px-1.5 py-1">
+              <Repeat2 className="h-3.5 w-3.5" aria-hidden="true" />
+              {cast.reactions.recasts_count}
+            </span>
+            <button
+              className="ml-auto inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-xs font-bold text-slate-600 hover:bg-slate-100"
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onReply();
+              }}
+            >
+              <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
+              Reply
+            </button>
+            <button
+              className={cn(
+                "inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white hover:bg-slate-100",
+                isBookmarked ? "text-ember" : "text-slate-600",
+              )}
+              type="button"
+              aria-label={isBookmarked ? "Remove bookmark" : "Bookmark cast"}
+              title={isBookmarked ? "Remove bookmark" : "Bookmark cast"}
+              onClick={(event) => {
+                event.stopPropagation();
+                onBookmark();
+              }}
+            >
+              {isBookmarked ? (
+                <BookmarkCheck className="h-4 w-4" aria-hidden="true" />
+              ) : (
+                <Bookmark className="h-4 w-4" aria-hidden="true" />
+              )}
+            </button>
           </div>
         </div>
       </article>
     </li>
+  );
+}
+
+function CastDetailPanel({
+  cast,
+  isBookmarked,
+  onBookmark,
+  onReply,
+}: {
+  cast: HypersnapCast | null;
+  isBookmarked: boolean;
+  onBookmark: () => void;
+  onReply: () => void;
+}) {
+  if (!cast) {
+    return (
+      <section className="rounded-md border border-slate-200 bg-white p-4">
+        <div className="mb-3 flex items-center gap-2 text-sm font-bold">
+          <MessageCircle className="h-4 w-4 text-snap" aria-hidden="true" />
+          Cast detail
+        </div>
+        <p className="rounded-md bg-slate-50 p-3 text-xs font-medium leading-5 text-slate-500">
+          Select a cast to inspect it here.
+        </p>
+      </section>
+    );
+  }
+
+  const displayName = getCastDisplayName(cast);
+  const username = getCastUsername(cast);
+  const avatarLetter = displayName.slice(0, 1).toUpperCase();
+
+  return (
+    <section className="rounded-md border border-slate-200 bg-white p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-bold">
+          <MessageCircle className="h-4 w-4 text-snap" aria-hidden="true" />
+          Cast detail
+        </div>
+        <button
+          className={cn(
+            "inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white hover:bg-slate-100",
+            isBookmarked ? "text-ember" : "text-slate-600",
+          )}
+          type="button"
+          aria-label={isBookmarked ? "Remove bookmark" : "Bookmark cast"}
+          title={isBookmarked ? "Remove bookmark" : "Bookmark cast"}
+          onClick={onBookmark}
+        >
+          {isBookmarked ? (
+            <BookmarkCheck className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <Bookmark className="h-4 w-4" aria-hidden="true" />
+          )}
+        </button>
+      </div>
+
+      <div className="flex gap-3">
+        {cast.author.pfp_url ? (
+          <img
+            className="h-11 w-11 flex-none rounded-md object-cover"
+            src={cast.author.pfp_url}
+            alt=""
+          />
+        ) : (
+          <div className="flex h-11 w-11 flex-none items-center justify-center rounded-md bg-ink text-sm font-bold text-snap">
+            {avatarLetter}
+          </div>
+        )}
+        <div className="min-w-0">
+          <p className="truncate text-sm font-bold">{displayName}</p>
+          <p className="truncate text-xs font-medium text-slate-500">{username}</p>
+        </div>
+      </div>
+
+      <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-900">
+        {cast.text || "(empty cast)"}
+      </p>
+
+      <div className="mt-4 grid grid-cols-3 gap-2 rounded-md bg-slate-50 p-2 text-center text-xs font-semibold text-slate-600">
+        <span>
+          <strong className="block text-sm text-slate-950">{cast.replies.count}</strong>
+          Replies
+        </span>
+        <span>
+          <strong className="block text-sm text-slate-950">
+            {cast.reactions.likes_count}
+          </strong>
+          Likes
+        </span>
+        <span>
+          <strong className="block text-sm text-slate-950">
+            {cast.reactions.recasts_count}
+          </strong>
+          Recasts
+        </span>
+      </div>
+
+      <div className="mt-3 flex">
+        <button
+          className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800"
+          type="button"
+          onClick={onReply}
+        >
+          <MessageCircle className="h-4 w-4" aria-hidden="true" />
+          Reply draft
+        </button>
+      </div>
+
+      <p className="mt-3 break-all rounded-md bg-slate-950 p-2 font-mono text-[11px] leading-4 text-slate-100">
+        {cast.hash}
+      </p>
+    </section>
   );
 }
 
@@ -1018,6 +1282,14 @@ function formatDraftDate(value: string) {
     hour: "numeric",
     minute: "2-digit",
   }).format(date);
+}
+
+function getCastDisplayName(cast: HypersnapCast) {
+  return cast.author.display_name || cast.author.username || `FID ${cast.author.fid}`;
+}
+
+function getCastUsername(cast: HypersnapCast) {
+  return cast.author.username ? `@${cast.author.username}` : `fid:${cast.author.fid}`;
 }
 
 export default App;
