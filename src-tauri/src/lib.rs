@@ -217,10 +217,27 @@ fn hash_from_hex(hash_hex: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn keychain_read_error(secret_label: &str, error: impl std::fmt::Display) -> String {
+    let message = error.to_string();
+    let lower = message.to_lowercase();
+
+    if lower.contains("passphrase")
+        || lower.contains("password")
+        || lower.contains("not correct")
+        || lower.contains("denied")
+    {
+        return format!(
+            "macOS Keychain rejected access to the {secret_label}. Enter your Mac login keychain password, not your Farcaster mnemonic, and choose Always Allow for Castora Desktop. If you clicked Deny or typed the wrong password, click Approve again."
+        );
+    }
+
+    format!("Failed to read {secret_label} from keychain: {message}")
+}
+
 fn signing_key_from_keychain(fid: u64) -> Result<Ed25519SigningKey, String> {
     let private_key_hex = signer_entry(fid)?
         .get_password()
-        .map_err(|error| format!("Failed to read signer from keychain: {error}"))?;
+        .map_err(|error| keychain_read_error("local signer key", error))?;
     Ok(Ed25519SigningKey::from_bytes(&private_key_from_hex(
         &private_key_hex,
     )?))
@@ -395,7 +412,7 @@ fn next_signer_nonce(app: &AppHandle, fid: u64) -> Result<u64, String> {
 fn custody_private_key_from_keychain(address: &str) -> Result<[u8; 32], String> {
     let private_key_hex = custody_entry(address)?
         .get_password()
-        .map_err(|error| format!("Failed to read custody key from keychain: {error}"))?;
+        .map_err(|error| keychain_read_error("owner key", error))?;
     custody_private_key_from_hex(&private_key_hex)
 }
 

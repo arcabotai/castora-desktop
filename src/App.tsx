@@ -601,12 +601,12 @@ function App() {
 
     try {
       setWriteResult(
-        "macOS may ask for login keychain access. Enter your Mac password and choose Always Allow to let Castora approve this signer.",
+        "macOS may ask for login keychain access. Enter your Mac login keychain password, not your mnemonic, and choose Always Allow.",
       );
       const approval = await withTimeout(
         approveSigner(targetAccount.fid, settings.hubSubmitUrl),
         18_000,
-        "Signer approval is still waiting on the native keychain or hub. Try again, and approve any macOS keychain prompt if one appears.",
+        "Signer approval is still waiting on the native keychain or hub. Try again, and approve any macOS keychain prompt with your Mac login keychain password.",
       );
       setWriteResult(
         `Submitted signer approval ${approval.hashHex.slice(0, 18)}... for FID ${targetAccount.fid} from ${source}. Checking registration now.`,
@@ -1846,7 +1846,7 @@ function ApprovalGuide({
           <p className="mt-1 text-xs font-semibold leading-5 text-amber-900">
             Castora made a local Ed25519 signer for your FID. Use Approve now
             to sign a KEY_ADD with your saved owner key and submit it to Hypersnap.
-            macOS may ask for your login keychain password.
+            macOS may ask for your Mac login keychain password.
           </p>
         </div>
       </div>
@@ -1917,9 +1917,10 @@ function ApprovalGuide({
       </div>
 
       <p className="mt-3 text-[11px] font-semibold leading-4 text-amber-800">
-        Choose Always Allow in the macOS keychain prompt for this dev build. The
-        owner key and signer key stay in the OS keychain; Castora only submits
-        the signed KEY_ADD message needed to delegate desktop posting.
+        Choose Always Allow in the macOS keychain prompt for this dev build. Use
+        your Mac login keychain password, not your mnemonic. The owner key and
+        signer key stay in the OS keychain; Castora only submits the signed KEY_ADD
+        message needed to delegate desktop posting.
       </p>
     </div>
   );
