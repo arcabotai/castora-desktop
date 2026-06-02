@@ -46,20 +46,21 @@ import {
 } from "./lib/hypersnap";
 import {
   createSigner,
+  deleteCustodyIdentity,
   deleteSigner,
   getAccount,
+  getCustodyIdentity,
   getSettings,
+  importCustodyFromMnemonic,
+  importCustodyPrivateKey,
   importSigner,
   saveSettings,
+  type CustodyIdentity,
   type DesktopAccount,
   type DesktopSettings,
 } from "./lib/tauri";
 import { buildSignedCastAdd, submitRawMessage, validateCastText } from "./lib/farcaster";
-import {
-  deriveCustodyAddressFromMnemonic,
-  isLikelyEthAddress,
-  normalizeEthAddress,
-} from "./lib/identity";
+import { isLikelyEthAddress, normalizeEthAddress } from "./lib/identity";
 import { cn } from "./lib/utils";
 
 const navItems = [
@@ -150,16 +151,20 @@ function App() {
   const [identitySearchInput, setIdentitySearchInput] = useState("");
   const [custodyAddressInput, setCustodyAddressInput] = useState("");
   const [mnemonicInput, setMnemonicInput] = useState("");
+  const [custodyPrivateKeyInput, setCustodyPrivateKeyInput] = useState("");
   const [privateKeyInput, setPrivateKeyInput] = useState("");
   const [writeResult, setWriteResult] = useState("");
   const [settingsDraft, setSettingsDraft] = useState<DesktopSettings>(DEFAULT_SETTINGS);
   const [signerStatus, setSignerStatus] = useState<SignerStatus>(emptySignerStatus);
   const [identityPreview, setIdentityPreview] = useState<HypersnapUser | null>(null);
+  const [custodyIdentity, setCustodyIdentity] = useState<CustodyIdentity | null>(null);
   const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>([]);
   const [bookmarkedCastHashes, setBookmarkedCastHashes] = useState<string[]>([]);
   const [selectedCastHash, setSelectedCastHash] = useState<string | null>(null);
   const [firstCastSubmitted, setFirstCastSubmitted] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [rememberCustodyKey, setRememberCustodyKey] = useState(true);
+  const [autoCreateSignerFromOwner, setAutoCreateSignerFromOwner] = useState(true);
   const [isPending, startTransition] = useTransition();
 
   const castValidation = useMemo(() => validateCastText(composeText), [composeText]);
@@ -201,6 +206,16 @@ function App() {
         action: () => {
           setCommandOpen(false);
           focusField("identity-search");
+        },
+      },
+      {
+        id: "owner-key",
+        label: "Import owner key",
+        group: "Account",
+        icon: ShieldCheck,
+        action: () => {
+          setCommandOpen(false);
+          focusField("mnemonic");
         },
       },
       {
@@ -278,9 +293,10 @@ function App() {
     let cancelled = false;
 
     async function bootstrap() {
-      const [storedSettings, storedAccount] = await Promise.all([
+      const [storedSettings, storedAccount, storedCustody] = await Promise.all([
         getSettings(),
         getAccount(),
+        getCustodyIdentity(),
       ]);
 
       if (cancelled) return;
@@ -288,6 +304,8 @@ function App() {
       setSettings(storedSettings);
       setSettingsDraft(storedSettings);
       setAccount(storedAccount);
+      setCustodyIdentity(storedCustody);
+      setCustodyAddressInput(storedCustody?.address ?? "");
       setFidInput(storedAccount?.fid ? String(storedAccount.fid) : "");
     }
 
@@ -534,8 +552,15 @@ function App() {
     }
   }
 
-  async function handleCreateSigner() {
-    const fid = Number(fidInput);
+  async function activateLocalSignerForFid(fid: number, source: string) {
+    if (!fid) {
+      throw new Error("Resolve an existing FID before creating a signer.");
+    }
+
+    if (account?.fid === fid) {
+      return account;
+    }
+
     const nextAccount = await createSigner(fid);
     const savedSettings = await saveSettings({ ...settings, selectedFid: fid });
     setAccount(nextAccount);
@@ -547,8 +572,14 @@ function App() {
       message: "Created locally. Approve this signer before submitting writes.",
     });
     setWriteResult(
-      `Created local desktop signer ${nextAccount.publicKeyHex.slice(0, 18)}... for FID ${fid}. Approve this signer before submitting writes.`,
+      `Created local desktop signer ${nextAccount.publicKeyHex.slice(0, 18)}... for FID ${fid} from ${source}. Approve this signer before submitting writes.`,
     );
+
+    return nextAccount;
+  }
+
+  async function handleCreateSigner() {
+    await activateLocalSignerForFid(Number(fidInput), "manual setup");
   }
 
   async function handleImportSigner() {
@@ -653,15 +684,53 @@ function App() {
     setMnemonicInput("");
 
     try {
-      const identity = await deriveCustodyAddressFromMnemonic(mnemonic);
-      setCustodyAddressInput(identity.address);
-      const user = await handleResolveCustodyAddress(identity.address);
-      setWriteResult(
-        `Derived ${identity.address} with ${identity.derivationPath}; resolved ${getUserUsername(user)}.`,
+      const custody = await importCustodyFromMnemonic(
+        mnemonic,
+        rememberCustodyKey,
       );
+      setCustodyIdentity(custody);
+      setCustodyAddressInput(custody.address);
+      const user = await handleResolveCustodyAddress(custody.address);
+
+      if (autoCreateSignerFromOwner) {
+        await activateLocalSignerForFid(user.fid, "owner key");
+      } else {
+        setWriteResult(
+          `Resolved ${getUserUsername(user)} from local owner key. Custody ${custody.hasKey ? "saved" : "not saved"} in keychain.`,
+        );
+      }
     } finally {
       setMnemonicInput("");
     }
+  }
+
+  async function handleImportCustodyPrivateKey() {
+    const privateKeyHex = custodyPrivateKeyInput;
+    setCustodyPrivateKeyInput("");
+
+    try {
+      const custody = await importCustodyPrivateKey(privateKeyHex, rememberCustodyKey);
+      setCustodyIdentity(custody);
+      setCustodyAddressInput(custody.address);
+      const user = await handleResolveCustodyAddress(custody.address);
+
+      if (autoCreateSignerFromOwner) {
+        await activateLocalSignerForFid(user.fid, "custody key");
+      } else {
+        setWriteResult(
+          `Resolved ${getUserUsername(user)} from custody key. Custody ${custody.hasKey ? "saved" : "not saved"} in keychain.`,
+        );
+      }
+    } finally {
+      setCustodyPrivateKeyInput("");
+    }
+  }
+
+  async function handleDeleteCustodyIdentity() {
+    await deleteCustodyIdentity();
+    setCustodyIdentity(null);
+    setCustodyAddressInput("");
+    setWriteResult("Removed local custody identity.");
   }
 
   async function handleDryRun() {
@@ -827,13 +896,22 @@ function App() {
           />
 
           <IdentityResolverPanel
+            autoCreateSignerFromOwner={autoCreateSignerFromOwner}
             custodyAddressInput={custodyAddressInput}
+            custodyIdentity={custodyIdentity}
+            custodyPrivateKeyInput={custodyPrivateKeyInput}
             identityPreview={identityPreview}
             identitySearchInput={identitySearchInput}
             mnemonicInput={mnemonicInput}
+            rememberCustodyKey={rememberCustodyKey}
+            onAutoCreateSignerFromOwnerChange={setAutoCreateSignerFromOwner}
             onCustodyAddressChange={setCustodyAddressInput}
+            onCustodyPrivateKeyChange={setCustodyPrivateKeyInput}
+            onDeleteCustodyIdentity={handleDeleteCustodyIdentity}
             onIdentitySearchChange={setIdentitySearchInput}
             onMnemonicChange={setMnemonicInput}
+            onRememberCustodyKeyChange={setRememberCustodyKey}
+            onImportCustodyPrivateKey={handleImportCustodyPrivateKey}
             onResolveCustodyAddress={handleResolveCustodyAddress}
             onResolveIdentity={handleResolveIdentity}
             onResolveMnemonic={handleResolveMnemonic}
@@ -1199,39 +1277,57 @@ function OnboardingPanel({
 }
 
 function IdentityResolverPanel({
+  autoCreateSignerFromOwner,
   custodyAddressInput,
+  custodyIdentity,
+  custodyPrivateKeyInput,
   identityPreview,
   identitySearchInput,
   mnemonicInput,
+  rememberCustodyKey,
+  onAutoCreateSignerFromOwnerChange,
   onCustodyAddressChange,
+  onCustodyPrivateKeyChange,
+  onDeleteCustodyIdentity,
   onIdentitySearchChange,
+  onImportCustodyPrivateKey,
   onMnemonicChange,
+  onRememberCustodyKeyChange,
   onResolveCustodyAddress,
   onResolveIdentity,
   onResolveMnemonic,
   onReport,
 }: {
+  autoCreateSignerFromOwner: boolean;
   custodyAddressInput: string;
+  custodyIdentity: CustodyIdentity | null;
+  custodyPrivateKeyInput: string;
   identityPreview: HypersnapUser | null;
   identitySearchInput: string;
   mnemonicInput: string;
+  rememberCustodyKey: boolean;
+  onAutoCreateSignerFromOwnerChange: (value: boolean) => void;
   onCustodyAddressChange: (value: string) => void;
+  onCustodyPrivateKeyChange: (value: string) => void;
+  onDeleteCustodyIdentity: () => Promise<void>;
   onIdentitySearchChange: (value: string) => void;
+  onImportCustodyPrivateKey: () => Promise<void>;
   onMnemonicChange: (value: string) => void;
+  onRememberCustodyKeyChange: (value: boolean) => void;
   onResolveCustodyAddress: () => Promise<HypersnapUser | undefined>;
   onResolveIdentity: () => Promise<void>;
   onResolveMnemonic: () => Promise<void>;
   onReport: (message: string) => void;
 }) {
   const [busyAction, setBusyAction] = useState<
-    "identity" | "custody" | "mnemonic" | null
+    "identity" | "custody" | "mnemonic" | "custody-key" | "delete-custody" | null
   >(null);
   const displayName = identityPreview ? getUserDisplayName(identityPreview) : "";
   const username = identityPreview ? getUserUsername(identityPreview) : "";
   const avatarLetter = displayName.slice(0, 1).toUpperCase();
 
   async function run(
-    action: "identity" | "custody" | "mnemonic",
+    action: "identity" | "custody" | "mnemonic" | "custody-key" | "delete-custody",
     callback: () => Promise<unknown>,
   ) {
     setBusyAction(action);
@@ -1308,29 +1404,131 @@ function IdentityResolverPanel({
         </button>
       </div>
 
-      <label className="mt-3 block text-xs font-bold text-slate-500" htmlFor="mnemonic">
-        Advanced mnemonic lookup
-      </label>
-      <textarea
-        id="mnemonic"
-        className="mt-1 min-h-16 w-full resize-none rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-snap focus:bg-white"
-        value={mnemonicInput}
-        onChange={(event) => onMnemonicChange(event.currentTarget.value)}
-        placeholder="BIP39 recovery phrase"
-      />
-      <button
-        className="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 text-sm font-bold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
-        type="button"
-        disabled={busyAction !== null || mnemonicInput.trim().split(/\s+/).length < 12}
-        onClick={() => run("mnemonic", onResolveMnemonic)}
-      >
-        {busyAction === "mnemonic" ? (
-          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-        ) : (
-          <ShieldAlert className="h-4 w-4" aria-hidden="true" />
-        )}
-        Resolve local mnemonic
-      </button>
+      <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
+            <ShieldCheck className="h-4 w-4 text-moss" aria-hidden="true" />
+            Owner key
+          </div>
+          {custodyIdentity ? (
+            <span
+              className={cn(
+                "rounded-md px-2 py-1 text-[11px] font-bold",
+                custodyIdentity.hasKey
+                  ? "bg-moss/15 text-emerald-700"
+                  : "bg-amber-100 text-amber-800",
+              )}
+            >
+              {custodyIdentity.hasKey ? "Keychain" : "Address only"}
+            </span>
+          ) : null}
+        </div>
+
+        <label className="block text-xs font-bold text-slate-500" htmlFor="mnemonic">
+          Recovery phrase
+        </label>
+        <textarea
+          id="mnemonic"
+          className="mt-1 min-h-16 w-full resize-none rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-snap"
+          value={mnemonicInput}
+          onChange={(event) => onMnemonicChange(event.currentTarget.value)}
+          placeholder="BIP39 recovery phrase"
+        />
+
+        <label className="mt-3 block text-xs font-bold text-slate-500" htmlFor="custody-key">
+          Custody private key
+        </label>
+        <input
+          id="custody-key"
+          className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none focus:border-snap"
+          value={custodyPrivateKeyInput}
+          onChange={(event) => onCustodyPrivateKeyChange(event.currentTarget.value)}
+          placeholder="0x..."
+          type="password"
+        />
+
+        <div className="mt-3 grid gap-2 text-xs font-semibold text-slate-600">
+          <label className="flex items-center gap-2">
+            <input
+              className="h-4 w-4 rounded border-slate-300 text-snap focus:ring-snap"
+              type="checkbox"
+              checked={rememberCustodyKey}
+              onChange={(event) => onRememberCustodyKeyChange(event.currentTarget.checked)}
+            />
+            Save derived custody key in Keychain
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              className="h-4 w-4 rounded border-slate-300 text-snap focus:ring-snap"
+              type="checkbox"
+              checked={autoCreateSignerFromOwner}
+              onChange={(event) =>
+                onAutoCreateSignerFromOwnerChange(event.currentTarget.checked)
+              }
+            />
+            Create desktop signer after match
+          </label>
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 text-sm font-bold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+            type="button"
+            disabled={busyAction !== null || mnemonicInput.trim().split(/\s+/).length < 12}
+            onClick={() => run("mnemonic", onResolveMnemonic)}
+          >
+            {busyAction === "mnemonic" ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <ShieldAlert className="h-4 w-4" aria-hidden="true" />
+            )}
+            Import phrase
+          </button>
+          <button
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+            type="button"
+            disabled={busyAction !== null || custodyPrivateKeyInput.trim().length < 64}
+            onClick={() => run("custody-key", onImportCustodyPrivateKey)}
+          >
+            {busyAction === "custody-key" ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <KeyRound className="h-4 w-4" aria-hidden="true" />
+            )}
+            Import key
+          </button>
+        </div>
+
+        {custodyIdentity ? (
+          <div className="mt-3 rounded-md bg-white p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-slate-500">Resolved custody</p>
+                <p className="mt-1 break-all font-mono text-[11px] leading-4 text-slate-700">
+                  {custodyIdentity.address}
+                </p>
+                <p className="mt-1 break-all font-mono text-[11px] leading-4 text-slate-500">
+                  {custodyIdentity.derivationPath}
+                </p>
+              </div>
+              <button
+                className="inline-flex h-8 w-8 flex-none items-center justify-center rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50 disabled:opacity-50"
+                type="button"
+                aria-label="Delete custody identity"
+                title="Delete custody identity"
+                disabled={busyAction !== null}
+                onClick={() => run("delete-custody", onDeleteCustodyIdentity)}
+              >
+                {busyAction === "delete-custody" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Trash2 className="h-4 w-4" aria-hidden="true" />
+                )}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
 
       {identityPreview ? (
         <div className="mt-3 rounded-md bg-slate-50 p-3">

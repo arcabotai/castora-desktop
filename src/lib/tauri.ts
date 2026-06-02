@@ -9,6 +9,12 @@ export type DesktopAccount = {
   hasSigner: boolean;
 };
 
+export type CustodyIdentity = {
+  address: string;
+  derivationPath: string;
+  hasKey: boolean;
+};
+
 export type SignMessageHashResponse = {
   publicKeyHex: string;
   signatureHex: string;
@@ -39,6 +45,11 @@ export async function getAccount(): Promise<DesktopAccount | null> {
   return invoke<DesktopAccount | null>("get_account");
 }
 
+export async function getCustodyIdentity(): Promise<CustodyIdentity | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<CustodyIdentity | null>("get_custody_identity");
+}
+
 export async function createSigner(fid: number): Promise<DesktopAccount> {
   return invoke<DesktopAccount>("create_signer", { fid });
 }
@@ -48,6 +59,28 @@ export async function importSigner(
   privateKeyHex: string,
 ): Promise<DesktopAccount> {
   return invoke<DesktopAccount>("import_signer", { fid, privateKeyHex });
+}
+
+export async function importCustodyFromMnemonic(
+  mnemonic: string,
+  remember: boolean,
+  derivationPath?: string,
+): Promise<CustodyIdentity> {
+  return invoke<CustodyIdentity>("import_custody_from_mnemonic", {
+    mnemonic,
+    remember,
+    derivationPath,
+  });
+}
+
+export async function importCustodyPrivateKey(
+  privateKeyHex: string,
+  remember: boolean,
+): Promise<CustodyIdentity> {
+  return invoke<CustodyIdentity>("import_custody_private_key", {
+    privateKeyHex,
+    remember,
+  });
 }
 
 export async function signMessageHash(
@@ -66,4 +99,8 @@ export async function submitSignedMessage(
 
 export async function deleteSigner(fid: number): Promise<void> {
   return invoke<void>("delete_signer", { fid });
+}
+
+export async function deleteCustodyIdentity(): Promise<void> {
+  return invoke<void>("delete_custody_identity");
 }
