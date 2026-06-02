@@ -522,7 +522,7 @@ function App() {
         checkedAt: new Date().toISOString(),
         message: registered
           ? "This desktop signer is approved for writes."
-          : "This local signer is not approved on KeyRegistry yet.",
+          : "Your account is connected. Approve this local signer before publishing casts.",
       });
 
       return registered;
@@ -554,10 +554,10 @@ function App() {
     setSignerStatus({
       state: "unregistered",
       eventCount: 0,
-      message: "Created locally. Approve this signer before submitting writes.",
+      message: "Local signer created. Approval is the final protocol step before publishing.",
     });
     setWriteResult(
-      `Created local desktop signer ${nextAccount.publicKeyHex.slice(0, 18)}... for FID ${fid} from ${source}. Approve this signer before submitting writes.`,
+      `Created local desktop signer ${nextAccount.publicKeyHex.slice(0, 18)}... for FID ${fid} from ${source}. Approve this public key through Farcaster's signer approval flow, then check approval.`,
     );
 
     return nextAccount;
@@ -727,7 +727,9 @@ function App() {
     }
 
     if (signerStatus.state !== "registered") {
-      setWriteResult("Signer must be approved on KeyRegistry before submitting.");
+      setWriteResult(
+        "Publishing is blocked until this local signer is approved for your FID. Copy the signer public key, approve it from the custody wallet or Farcaster signer flow, then check approval again.",
+      );
       return;
     }
 
@@ -821,11 +823,11 @@ function App() {
           <div className="mt-8 rounded-md border border-slate-200 bg-slate-50 p-3">
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
               <ShieldCheck className="h-4 w-4 text-moss" aria-hidden="true" />
-              Local signer
+              Local custody
             </div>
             <p className="text-xs leading-5 text-slate-500">
-              Secrets live in the OS keychain. The web UI can ask for signatures but
-              never receives private keys.
+              Owner and signer keys stay in the OS keychain. Approval delegates posting
+              only; it does not transfer account ownership.
             </p>
           </div>
         </aside>
@@ -1332,6 +1334,7 @@ function ConnectAccountScreen({
               <ConnectStep done={Boolean(custodyIdentity)} label="Owner key" />
               <ConnectStep done={Boolean(identityPreview)} label="Account match" />
               <ConnectStep done={false} label="Desktop signer" />
+              <ConnectStep done={false} label="Signer approval" />
               <ConnectStep done={false} label="Ready to cast" />
             </ol>
           </section>
@@ -1455,6 +1458,7 @@ function Composer({
   const dryRunDisabled = isPending || busyAction !== null || !activeFid || !validation.valid;
   const submitDisabled =
     dryRunDisabled || signerStatus.state !== "registered";
+  const helperText = getComposerHelperText(signerStatus, validation);
 
   async function run(action: "dry" | "submit") {
     setBusyAction(action);
@@ -1485,7 +1489,7 @@ function Composer({
               signerStatusClasses(signerStatus.state),
             )}
           >
-            {signerStatusLabel(signerStatus.state)}
+            {composerSignerStatusLabel(signerStatus.state)}
           </span>
           <span
             className={cn(
@@ -1515,9 +1519,7 @@ function Composer({
       />
 
       <div className="mt-3 flex items-center justify-between gap-3">
-        <p className="text-xs font-medium text-slate-500">
-          {validation.valid ? signerStatus.message : validation.reason}
-        </p>
+        <p className="text-xs font-medium text-slate-500">{helperText}</p>
         <div className="flex flex-wrap justify-end gap-2">
           <button
             className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
@@ -1648,6 +1650,15 @@ function SessionPanel({
         <p className="leading-5">{signerStatus.message}</p>
       </div>
 
+      {signerStatus.state === "unregistered" ? (
+        <ApprovalGuide
+          account={account}
+          busy={busy}
+          onCheck={() => run("check", onCheckSigner)}
+          setWriteResult={setWriteResult}
+        />
+      ) : null}
+
       <div className="mt-3 grid grid-cols-2 gap-2">
         <button
           className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800"
@@ -1712,6 +1723,108 @@ function SessionPanel({
         </div>
       </div>
     </section>
+  );
+}
+
+function ApprovalGuide({
+  account,
+  busy,
+  onCheck,
+  setWriteResult,
+}: {
+  account: DesktopAccount;
+  busy: "check" | "delete" | null;
+  onCheck: () => Promise<void>;
+  setWriteResult: (value: string) => void;
+}) {
+  async function copySignerKey() {
+    try {
+      await navigator.clipboard.writeText(account.publicKeyHex);
+      setWriteResult("Copied signer public key for approval.");
+    } catch (error) {
+      setWriteResult(
+        error instanceof Error ? error.message : "Unable to copy signer key.",
+      );
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-amber-950">
+      <div className="flex items-start gap-2">
+        <ShieldAlert className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />
+        <div>
+          <p className="text-xs font-bold">Approval required</p>
+          <p className="mt-1 text-xs font-semibold leading-5 text-amber-900">
+            Castora made a local Ed25519 signer for your FID. Farcaster hubs only
+            accept casts after your account approves that public key through the
+            Key Gateway and it appears in the Key Registry.
+          </p>
+        </div>
+      </div>
+
+      <ol className="mt-3 space-y-2 text-xs font-semibold leading-5">
+        <li className="flex gap-2">
+          <span className="flex h-5 w-5 flex-none items-center justify-center rounded-md bg-white text-[11px] font-bold text-amber-800">
+            1
+          </span>
+          Copy this signer public key.
+        </li>
+        <li className="flex gap-2">
+          <span className="flex h-5 w-5 flex-none items-center justify-center rounded-md bg-white text-[11px] font-bold text-amber-800">
+            2
+          </span>
+          Approve it from the custody wallet or a Farcaster signed-key-request flow.
+        </li>
+        <li className="flex gap-2">
+          <span className="flex h-5 w-5 flex-none items-center justify-center rounded-md bg-white text-[11px] font-bold text-amber-800">
+            3
+          </span>
+          Wait for the Key Registry update to confirm on Optimism.
+        </li>
+        <li className="flex gap-2">
+          <span className="flex h-5 w-5 flex-none items-center justify-center rounded-md bg-white text-[11px] font-bold text-amber-800">
+            4
+          </span>
+          Return to Castora and check approval again.
+        </li>
+      </ol>
+
+      <div className="mt-3 rounded-md bg-white p-2">
+        <p className="mb-1 text-[11px] font-bold text-amber-800">Signer public key</p>
+        <p className="break-all font-mono text-[11px] leading-4 text-slate-700">
+          {account.publicKeyHex}
+        </p>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-white px-3 text-xs font-bold text-amber-900 hover:bg-amber-100"
+          type="button"
+          onClick={copySignerKey}
+        >
+          <Copy className="h-4 w-4" aria-hidden="true" />
+          Copy key
+        </button>
+        <button
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-ink px-3 text-xs font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+          type="button"
+          disabled={busy !== null}
+          onClick={onCheck}
+        >
+          {busy === "check" ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />
+          )}
+          Check again
+        </button>
+      </div>
+
+      <p className="mt-3 text-[11px] font-semibold leading-4 text-amber-800">
+        Castora does not yet generate the approval deeplink or submit the Key Gateway
+        transaction for you. Only the public signer key is shared; your custody key stays local.
+      </p>
+    </div>
   );
 }
 
@@ -2153,12 +2266,38 @@ function signerStatusLabel(state: SignerStatusState) {
     case "checking":
       return "Checking";
     case "unregistered":
-      return "Needs approval";
+      return "Approval required";
     case "error":
       return "Check failed";
     case "idle":
     default:
       return "No signer";
+  }
+}
+
+function composerSignerStatusLabel(state: SignerStatusState) {
+  if (state === "unregistered") return "Local signer";
+  return signerStatusLabel(state);
+}
+
+function getComposerHelperText(
+  signerStatus: SignerStatus,
+  validation: ReturnType<typeof validateCastText>,
+) {
+  if (!validation.valid) return validation.reason;
+
+  switch (signerStatus.state) {
+    case "registered":
+      return "Signer approved. You can publish from Castora Desktop.";
+    case "unregistered":
+      return "Drafting and dry signing work locally. Publishing waits for signer approval.";
+    case "checking":
+      return "Checking whether this local signer is approved for your FID.";
+    case "error":
+      return signerStatus.message;
+    case "idle":
+    default:
+      return "Connect an account to create a local desktop signer.";
   }
 }
 
