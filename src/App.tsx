@@ -7,6 +7,7 @@ import {
   BookmarkCheck,
   CheckCircle2,
   CircleDot,
+  Command,
   Compass,
   Copy,
   Feather,
@@ -23,9 +24,12 @@ import {
   Save,
   Search,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   Trash2,
+  UserCheck,
   UserRound,
+  Wallet,
   X,
 } from "lucide-react";
 import "./App.css";
@@ -33,8 +37,12 @@ import {
   DEFAULT_SETTINGS,
   fetchSignerEvents,
   fetchTrendingFeed,
+  fetchUserByCustodyAddress,
+  fetchUserByFid,
+  fetchUserByUsername,
   isSignerRegistered,
   type HypersnapCast,
+  type HypersnapUser,
 } from "./lib/hypersnap";
 import {
   createSigner,
@@ -47,6 +55,11 @@ import {
   type DesktopSettings,
 } from "./lib/tauri";
 import { buildSignedCastAdd, submitRawMessage, validateCastText } from "./lib/farcaster";
+import {
+  deriveCustodyAddressFromMnemonic,
+  isLikelyEthAddress,
+  normalizeEthAddress,
+} from "./lib/identity";
 import { cn } from "./lib/utils";
 
 const navItems = [
@@ -88,6 +101,15 @@ type PrimaryOnboardingAction =
   | { kind: "focus-compose"; label: string; disabled: boolean }
   | { kind: "complete"; label: string; disabled: boolean };
 
+type CommandItem = {
+  id: string;
+  label: string;
+  group: string;
+  disabled?: boolean;
+  icon: typeof Home;
+  action: () => void | Promise<void>;
+};
+
 const emptySignerStatus: SignerStatus = {
   state: "idle",
   eventCount: 0,
@@ -125,14 +147,19 @@ function App() {
     "Hello from Castora Desktop on Hypersnap.",
   );
   const [fidInput, setFidInput] = useState("");
+  const [identitySearchInput, setIdentitySearchInput] = useState("");
+  const [custodyAddressInput, setCustodyAddressInput] = useState("");
+  const [mnemonicInput, setMnemonicInput] = useState("");
   const [privateKeyInput, setPrivateKeyInput] = useState("");
   const [writeResult, setWriteResult] = useState("");
   const [settingsDraft, setSettingsDraft] = useState<DesktopSettings>(DEFAULT_SETTINGS);
   const [signerStatus, setSignerStatus] = useState<SignerStatus>(emptySignerStatus);
+  const [identityPreview, setIdentityPreview] = useState<HypersnapUser | null>(null);
   const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>([]);
   const [bookmarkedCastHashes, setBookmarkedCastHashes] = useState<string[]>([]);
   const [selectedCastHash, setSelectedCastHash] = useState<string | null>(null);
   const [firstCastSubmitted, setFirstCastSubmitted] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
 
   const castValidation = useMemo(() => validateCastText(composeText), [composeText]);
@@ -142,6 +169,109 @@ function App() {
   const selectedCast = useMemo(
     () => casts.find((cast) => cast.hash === selectedCastHash) ?? casts[0] ?? null,
     [casts, selectedCastHash],
+  );
+  const commandItems = useMemo<CommandItem[]>(
+    () => [
+      {
+        id: "new-cast",
+        label: "New cast",
+        group: "Compose",
+        icon: Feather,
+        action: () => {
+          setCommandOpen(false);
+          focusField("compose-text");
+        },
+      },
+      {
+        id: "save-draft",
+        label: "Save draft",
+        group: "Compose",
+        icon: Save,
+        disabled: composeText.trim().length === 0,
+        action: () => {
+          handleSaveDraft();
+          setCommandOpen(false);
+        },
+      },
+      {
+        id: "resolve-identity",
+        label: "Resolve identity",
+        group: "Account",
+        icon: UserCheck,
+        action: () => {
+          setCommandOpen(false);
+          focusField("identity-search");
+        },
+      },
+      {
+        id: "check-signer",
+        label: "Check signer approval",
+        group: "Account",
+        icon: RefreshCw,
+        disabled: !account || signerStatus.state === "checking",
+        action: async () => {
+          await checkSignerReadiness(account);
+          setCommandOpen(false);
+        },
+      },
+      {
+        id: "reply",
+        label: "Reply to selected cast",
+        group: "Feed",
+        icon: MessageCircle,
+        disabled: !selectedCast,
+        action: () => {
+          if (selectedCast) handleStartReply(selectedCast);
+          setCommandOpen(false);
+        },
+      },
+      {
+        id: "bookmark",
+        label: selectedCast && bookmarkedCastHashes.includes(selectedCast.hash)
+          ? "Remove selected bookmark"
+          : "Bookmark selected cast",
+        group: "Feed",
+        icon: Bookmark,
+        disabled: !selectedCast,
+        action: () => {
+          if (selectedCast) handleToggleBookmark(selectedCast);
+          setCommandOpen(false);
+        },
+      },
+      {
+        id: "previous-cast",
+        label: "Previous cast",
+        group: "Feed",
+        icon: ArrowRight,
+        disabled: casts.length === 0,
+        action: () => {
+          moveSelectedCast(-1);
+          setCommandOpen(false);
+        },
+      },
+      {
+        id: "next-cast",
+        label: "Next cast",
+        group: "Feed",
+        icon: ArrowRight,
+        disabled: casts.length === 0,
+        action: () => {
+          moveSelectedCast(1);
+          setCommandOpen(false);
+        },
+      },
+    ],
+    [
+      account,
+      activeFid,
+      bookmarkedCastHashes,
+      casts.length,
+      composeText,
+      savedDrafts,
+      selectedCast,
+      settings.nodeBaseUrl,
+      signerStatus.state,
+    ],
   );
 
   useEffect(() => {
@@ -238,6 +368,27 @@ function App() {
   }, [account?.fid, account?.publicKeyHex, settings.nodeBaseUrl]);
 
   useEffect(() => {
+    if (!activeFid) {
+      setIdentityPreview(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    fetchUserByFid(settings.nodeBaseUrl, activeFid)
+      .then((user) => {
+        if (!cancelled) setIdentityPreview(user);
+      })
+      .catch(() => {
+        if (!cancelled) setIdentityPreview(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeFid, settings.nodeBaseUrl]);
+
+  useEffect(() => {
     if (casts.length === 0) {
       setSelectedCastHash(null);
       return;
@@ -247,6 +398,47 @@ function App() {
       setSelectedCastHash(casts[0].hash);
     }
   }, [casts, selectedCastHash]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen((current) => !current);
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        focusField("compose-text");
+        return;
+      }
+
+      if (event.key === "Escape" && commandOpen) {
+        event.preventDefault();
+        setCommandOpen(false);
+        return;
+      }
+
+      if (commandOpen || isTextEntryActive()) return;
+
+      if (event.key.toLowerCase() === "j") {
+        event.preventDefault();
+        moveSelectedCast(1);
+      } else if (event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        moveSelectedCast(-1);
+      } else if (event.key.toLowerCase() === "r" && selectedCast) {
+        event.preventDefault();
+        handleStartReply(selectedCast);
+      } else if (event.key.toLowerCase() === "b" && selectedCast) {
+        event.preventDefault();
+        handleToggleBookmark(selectedCast);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [commandOpen, selectedCast, casts, selectedCastHash, bookmarkedCastHashes]);
 
   async function persistSettings() {
     const saved = await saveSettings(settingsDraft);
@@ -282,6 +474,24 @@ function App() {
     setSelectedCastHash(cast.hash);
     setComposeText(`${handle} `);
     setWriteResult("Reply draft started locally.");
+  }
+
+  function moveSelectedCast(offset: number) {
+    if (casts.length === 0) return;
+
+    const currentIndex = Math.max(
+      0,
+      casts.findIndex((cast) => cast.hash === selectedCastHash),
+    );
+    const nextIndex = Math.min(Math.max(currentIndex + offset, 0), casts.length - 1);
+    const nextCast = casts[nextIndex];
+
+    setSelectedCastHash(nextCast.hash);
+    window.setTimeout(() => {
+      document.getElementById(castRowId(nextCast.hash))?.scrollIntoView({
+        block: "nearest",
+      });
+    }, 0);
   }
 
   async function checkSignerReadiness(
@@ -398,6 +608,60 @@ function App() {
 
   function focusField(id: string) {
     document.getElementById(id)?.focus();
+  }
+
+  function applyResolvedUser(user: HypersnapUser, source: string) {
+    setIdentityPreview(user);
+    setFidInput(String(user.fid));
+    setIdentitySearchInput(user.username || String(user.fid));
+    setWriteResult(
+      `Resolved ${getUserDisplayName(user)} (${getUserUsername(user)}) from ${source}.`,
+    );
+  }
+
+  async function handleResolveIdentity() {
+    const query = identitySearchInput.trim();
+
+    if (!query) {
+      focusField("identity-search");
+      return;
+    }
+
+    const user = /^\d+$/.test(query)
+      ? await fetchUserByFid(settings.nodeBaseUrl, Number(query))
+      : await fetchUserByUsername(settings.nodeBaseUrl, query);
+
+    applyResolvedUser(user, /^\d+$/.test(query) ? "FID" : "username");
+  }
+
+  async function handleResolveCustodyAddress(address = custodyAddressInput) {
+    const normalizedAddress = normalizeEthAddress(address);
+
+    if (!isLikelyEthAddress(normalizedAddress)) {
+      throw new Error("Enter a 0x-prefixed Ethereum custody address.");
+    }
+
+    const user = await fetchUserByCustodyAddress(settings.nodeBaseUrl, normalizedAddress);
+    setCustodyAddressInput(normalizedAddress);
+    applyResolvedUser(user, "custody address");
+
+    return user;
+  }
+
+  async function handleResolveMnemonic() {
+    const mnemonic = mnemonicInput;
+    setMnemonicInput("");
+
+    try {
+      const identity = await deriveCustodyAddressFromMnemonic(mnemonic);
+      setCustodyAddressInput(identity.address);
+      const user = await handleResolveCustodyAddress(identity.address);
+      setWriteResult(
+        `Derived ${identity.address} with ${identity.derivationPath}; resolved ${getUserUsername(user)}.`,
+      );
+    } finally {
+      setMnemonicInput("");
+    }
   }
 
   async function handleDryRun() {
@@ -562,6 +826,20 @@ function App() {
             onReport={setWriteResult}
           />
 
+          <IdentityResolverPanel
+            custodyAddressInput={custodyAddressInput}
+            identityPreview={identityPreview}
+            identitySearchInput={identitySearchInput}
+            mnemonicInput={mnemonicInput}
+            onCustodyAddressChange={setCustodyAddressInput}
+            onIdentitySearchChange={setIdentitySearchInput}
+            onMnemonicChange={setMnemonicInput}
+            onResolveCustodyAddress={handleResolveCustodyAddress}
+            onResolveIdentity={handleResolveIdentity}
+            onResolveMnemonic={handleResolveMnemonic}
+            onReport={setWriteResult}
+          />
+
           <CastDetailPanel
             cast={selectedCast}
             isBookmarked={
@@ -612,6 +890,11 @@ function App() {
           </div>
         </aside>
       </div>
+      <CommandPalette
+        commands={commandItems}
+        open={commandOpen}
+        onClose={() => setCommandOpen(false)}
+      />
     </main>
   );
 }
@@ -915,6 +1198,258 @@ function OnboardingPanel({
   );
 }
 
+function IdentityResolverPanel({
+  custodyAddressInput,
+  identityPreview,
+  identitySearchInput,
+  mnemonicInput,
+  onCustodyAddressChange,
+  onIdentitySearchChange,
+  onMnemonicChange,
+  onResolveCustodyAddress,
+  onResolveIdentity,
+  onResolveMnemonic,
+  onReport,
+}: {
+  custodyAddressInput: string;
+  identityPreview: HypersnapUser | null;
+  identitySearchInput: string;
+  mnemonicInput: string;
+  onCustodyAddressChange: (value: string) => void;
+  onIdentitySearchChange: (value: string) => void;
+  onMnemonicChange: (value: string) => void;
+  onResolveCustodyAddress: () => Promise<HypersnapUser | undefined>;
+  onResolveIdentity: () => Promise<void>;
+  onResolveMnemonic: () => Promise<void>;
+  onReport: (message: string) => void;
+}) {
+  const [busyAction, setBusyAction] = useState<
+    "identity" | "custody" | "mnemonic" | null
+  >(null);
+  const displayName = identityPreview ? getUserDisplayName(identityPreview) : "";
+  const username = identityPreview ? getUserUsername(identityPreview) : "";
+  const avatarLetter = displayName.slice(0, 1).toUpperCase();
+
+  async function run(
+    action: "identity" | "custody" | "mnemonic",
+    callback: () => Promise<unknown>,
+  ) {
+    setBusyAction(action);
+    try {
+      await callback();
+    } catch (error) {
+      onReport(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  return (
+    <section className="mt-4 rounded-md border border-slate-200 bg-white p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-bold">
+          <UserCheck className="h-4 w-4 text-moss" aria-hidden="true" />
+          Identity
+        </div>
+        {identityPreview ? (
+          <span className="rounded-md bg-moss/15 px-2 py-1 text-xs font-bold text-emerald-700">
+            FID {identityPreview.fid}
+          </span>
+        ) : null}
+      </div>
+
+      <label className="block text-xs font-bold text-slate-500" htmlFor="identity-search">
+        FID or username
+      </label>
+      <div className="mt-1 flex gap-2">
+        <input
+          id="identity-search"
+          className="h-9 min-w-0 flex-1 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-snap"
+          value={identitySearchInput}
+          onChange={(event) => onIdentitySearchChange(event.currentTarget.value)}
+          placeholder="dwr or 3"
+        />
+        <button
+          className="inline-flex h-9 items-center justify-center rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+          type="button"
+          disabled={busyAction !== null || identitySearchInput.trim().length === 0}
+          onClick={() => run("identity", onResolveIdentity)}
+        >
+          {busyAction === "identity" ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <Search className="h-4 w-4" aria-hidden="true" />
+          )}
+        </button>
+      </div>
+
+      <label className="mt-3 block text-xs font-bold text-slate-500" htmlFor="custody-address">
+        Custody address
+      </label>
+      <div className="mt-1 flex gap-2">
+        <input
+          id="custody-address"
+          className="h-9 min-w-0 flex-1 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-snap"
+          value={custodyAddressInput}
+          onChange={(event) => onCustodyAddressChange(event.currentTarget.value)}
+          placeholder="0x..."
+        />
+        <button
+          className="inline-flex h-9 items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+          type="button"
+          disabled={busyAction !== null || custodyAddressInput.trim().length === 0}
+          onClick={() => run("custody", onResolveCustodyAddress)}
+        >
+          {busyAction === "custody" ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <Wallet className="h-4 w-4" aria-hidden="true" />
+          )}
+        </button>
+      </div>
+
+      <label className="mt-3 block text-xs font-bold text-slate-500" htmlFor="mnemonic">
+        Advanced mnemonic lookup
+      </label>
+      <textarea
+        id="mnemonic"
+        className="mt-1 min-h-16 w-full resize-none rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-snap focus:bg-white"
+        value={mnemonicInput}
+        onChange={(event) => onMnemonicChange(event.currentTarget.value)}
+        placeholder="BIP39 recovery phrase"
+      />
+      <button
+        className="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 text-sm font-bold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+        type="button"
+        disabled={busyAction !== null || mnemonicInput.trim().split(/\s+/).length < 12}
+        onClick={() => run("mnemonic", onResolveMnemonic)}
+      >
+        {busyAction === "mnemonic" ? (
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+        ) : (
+          <ShieldAlert className="h-4 w-4" aria-hidden="true" />
+        )}
+        Resolve local mnemonic
+      </button>
+
+      {identityPreview ? (
+        <div className="mt-3 rounded-md bg-slate-50 p-3">
+          <div className="flex gap-3">
+            {identityPreview.pfp_url ? (
+              <img
+                className="h-10 w-10 flex-none rounded-md object-cover"
+                src={identityPreview.pfp_url}
+                alt=""
+              />
+            ) : (
+              <div className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-ink text-sm font-bold text-snap">
+                {avatarLetter}
+              </div>
+            )}
+            <div className="min-w-0">
+              <p className="truncate text-sm font-bold">{displayName}</p>
+              <p className="truncate text-xs font-medium text-slate-500">{username}</p>
+            </div>
+          </div>
+          {identityPreview.custody_address ? (
+            <p className="mt-2 break-all font-mono text-[11px] leading-4 text-slate-500">
+              {identityPreview.custody_address}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function CommandPalette({
+  commands,
+  open,
+  onClose,
+}: {
+  commands: CommandItem[];
+  open: boolean;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    if (open) setQuery("");
+  }, [open]);
+
+  if (!open) return null;
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredCommands = commands.filter((command) => {
+    if (!normalizedQuery) return true;
+    return `${command.group} ${command.label}`.toLowerCase().includes(normalizedQuery);
+  });
+  const groups = Array.from(new Set(filteredCommands.map((command) => command.group)));
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-slate-950/20 px-4 pt-20 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-xl overflow-hidden rounded-md border border-slate-200 bg-white shadow-frame">
+        <div className="flex h-12 items-center gap-3 border-b border-slate-200 px-4">
+          <Command className="h-4 w-4 text-slate-400" aria-hidden="true" />
+          <input
+            autoFocus
+            className="h-full min-w-0 flex-1 border-0 bg-transparent text-sm font-semibold outline-none"
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                onClose();
+              }
+            }}
+            placeholder="Search actions"
+          />
+        </div>
+
+        <div className="max-h-[420px] overflow-y-auto p-2">
+          {filteredCommands.length === 0 ? (
+            <p className="rounded-md px-3 py-6 text-center text-sm font-medium text-slate-500">
+              No actions found.
+            </p>
+          ) : (
+            groups.map((group) => (
+              <div key={group} className="py-1">
+                <p className="px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">
+                  {group}
+                </p>
+                {filteredCommands
+                  .filter((command) => command.group === group)
+                  .map((command) => {
+                    const Icon = command.icon;
+                    return (
+                      <button
+                        key={command.id}
+                        className="flex h-10 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-40"
+                        type="button"
+                        disabled={command.disabled}
+                        onClick={() => void command.action()}
+                      >
+                        <Icon className="h-4 w-4 text-slate-500" aria-hidden="true" />
+                        {command.label}
+                      </button>
+                    );
+                  })}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CastRow({
   cast,
   isBookmarked,
@@ -936,6 +1471,7 @@ function CastRow({
 
   return (
     <li
+      id={castRowId(cast.hash)}
       className={cn(
         "px-6 py-4 transition hover:bg-slate-50",
         isSelected && "bg-slate-50 shadow-[inset_3px_0_0_#17c4d8]",
@@ -1570,6 +2106,30 @@ function getCastDisplayName(cast: HypersnapCast) {
 
 function getCastUsername(cast: HypersnapCast) {
   return cast.author.username ? `@${cast.author.username}` : `fid:${cast.author.fid}`;
+}
+
+function getUserDisplayName(user: HypersnapUser) {
+  return user.display_name || user.username || `FID ${user.fid}`;
+}
+
+function getUserUsername(user: HypersnapUser) {
+  return user.username ? `@${user.username}` : `fid:${user.fid}`;
+}
+
+function castRowId(hash: string) {
+  return `cast-row-${hash.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+}
+
+function isTextEntryActive() {
+  const activeElement = document.activeElement;
+
+  if (!activeElement) return false;
+
+  return (
+    activeElement instanceof HTMLInputElement ||
+    activeElement instanceof HTMLTextAreaElement ||
+    activeElement.getAttribute("contenteditable") === "true"
+  );
 }
 
 export default App;

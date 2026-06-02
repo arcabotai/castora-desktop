@@ -8,10 +8,19 @@ export type HypersnapUser = {
   fid: number;
   username: string;
   display_name: string;
+  custody_address?: string;
   pfp_url: string;
   profile: { bio: { text: string } };
   follower_count: number;
   following_count: number;
+  verified_addresses?: {
+    eth_addresses?: string[];
+    sol_addresses?: string[];
+    primary?: {
+      eth_address?: string;
+      sol_address?: string;
+    };
+  };
 };
 
 export type HypersnapCast = {
@@ -41,6 +50,10 @@ type FeedResponse = {
 type SignersResponse = {
   events?: HypersnapSignerEvent[];
   next?: { cursor?: string | null };
+};
+
+type UserResponse = {
+  user?: HypersnapUser;
 };
 
 export function normalizeBaseUrl(url: string) {
@@ -96,6 +109,53 @@ export async function fetchFollowingFeed(nodeBaseUrl: string, fid: number) {
   return response.casts ?? [];
 }
 
+export async function fetchUserByFid(nodeBaseUrl: string, fid: number) {
+  const response = await hypersnapGet<UserResponse>(nodeBaseUrl, "/v2/farcaster/user", {
+    fid,
+  });
+
+  if (!response.user) {
+    throw new Error(`No Farcaster user found for FID ${fid}.`);
+  }
+
+  return response.user;
+}
+
+export async function fetchUserByUsername(nodeBaseUrl: string, username: string) {
+  const response = await hypersnapGet<UserResponse>(
+    nodeBaseUrl,
+    "/v2/farcaster/user/by-username",
+    {
+      username: normalizeUsername(username),
+    },
+  );
+
+  if (!response.user) {
+    throw new Error(`No Farcaster user found for ${username}.`);
+  }
+
+  return response.user;
+}
+
+export async function fetchUserByCustodyAddress(
+  nodeBaseUrl: string,
+  custodyAddress: string,
+) {
+  const response = await hypersnapGet<UserResponse>(
+    nodeBaseUrl,
+    "/v2/farcaster/user/custody-address",
+    {
+      custody_address: custodyAddress,
+    },
+  );
+
+  if (!response.user) {
+    throw new Error(`No Farcaster user found for custody address ${custodyAddress}.`);
+  }
+
+  return response.user;
+}
+
 export async function fetchSignerEvents(nodeBaseUrl: string, fid: number) {
   const response = await hypersnapGet<SignersResponse>(nodeBaseUrl, "/v2/farcaster/signer", {
     fid,
@@ -114,4 +174,8 @@ export function isSignerRegistered(
 
 export function normalizeSignerKey(key: string) {
   return key.trim().toLowerCase().replace(/^0x/, "");
+}
+
+export function normalizeUsername(username: string) {
+  return username.trim().replace(/^@/, "");
 }
