@@ -26,6 +26,16 @@ export type RawSubmitResponse = {
   body: string;
 };
 
+export type ApproveSignerResponse = {
+  publicKeyHex: string;
+  custodyAddress: string;
+  nonce: number;
+  deadlineUnix: number;
+  ttlSeconds: number;
+  hashHex: string;
+  submit: RawSubmitResponse;
+};
+
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -95,6 +105,13 @@ export async function submitSignedMessage(
   encodedMessageHex: string,
 ): Promise<RawSubmitResponse> {
   return invoke<RawSubmitResponse>("submit_raw_message", { submitUrl, encodedMessageHex });
+}
+
+export async function approveSigner(
+  fid: number,
+  submitUrl: string,
+): Promise<ApproveSignerResponse> {
+  return invoke<ApproveSignerResponse>("approve_signer", { fid, submitUrl });
 }
 
 export async function deleteSigner(fid: number): Promise<void> {

@@ -36,15 +36,18 @@ import "./App.css";
 import {
   DEFAULT_SETTINGS,
   fetchSignerEvents,
+  fetchSignerKeys,
   fetchTrendingFeed,
   fetchUserByCustodyAddress,
   fetchUserByFid,
   fetchUserByUsername,
+  isSignerKeyRegistered,
   isSignerRegistered,
   type HypersnapCast,
   type HypersnapUser,
 } from "./lib/hypersnap";
 import {
+  approveSigner,
   createSigner,
   deleteSigner,
   getAccount,
@@ -203,6 +206,17 @@ function App() {
         action: () => {
           setCommandOpen(false);
           focusField("mnemonic");
+        },
+      },
+      {
+        id: "approve-signer",
+        label: "Approve local signer",
+        group: "Account",
+        icon: ShieldCheck,
+        disabled: !account || signerStatus.state === "checking" || signerStatus.state === "registered",
+        action: async () => {
+          await handleApproveSigner(account);
+          setCommandOpen(false);
         },
       },
       {
@@ -513,16 +527,26 @@ function App() {
     });
 
     try {
-      const events = await fetchSignerEvents(nodeBaseUrl, targetAccount.fid);
-      const registered = isSignerRegistered(events, targetAccount.publicKeyHex);
+      let signerCount = 0;
+      let registered = false;
+
+      try {
+        const signerKeys = await fetchSignerKeys(nodeBaseUrl, targetAccount.fid);
+        signerCount = signerKeys.length;
+        registered = isSignerKeyRegistered(signerKeys, targetAccount.publicKeyHex);
+      } catch {
+        const events = await fetchSignerEvents(nodeBaseUrl, targetAccount.fid);
+        signerCount = events.length;
+        registered = isSignerRegistered(events, targetAccount.publicKeyHex);
+      }
 
       setSignerStatus({
         state: registered ? "registered" : "unregistered",
-        eventCount: events.length,
+        eventCount: signerCount,
         checkedAt: new Date().toISOString(),
         message: registered
           ? "This desktop signer is approved for writes."
-          : "Your account is connected. Approve this local signer before publishing casts.",
+          : "Your account is connected. Castora can approve this local signer from your saved owner key.",
       });
 
       return registered;
@@ -563,8 +587,56 @@ function App() {
     return nextAccount;
   }
 
+  async function handleApproveSigner(targetAccount = account, source = "manual approval") {
+    if (!targetAccount) {
+      throw new Error("Create a local desktop signer before approving it.");
+    }
+
+    setSignerStatus({
+      state: "checking",
+      eventCount: 0,
+      message: "Approving local signer with your saved owner key.",
+    });
+    setWriteResult("Submitting signer approval to Hypersnap.");
+
+    try {
+      setWriteResult(
+        "macOS may ask for login keychain access. Enter your Mac password and choose Always Allow to let Castora approve this signer.",
+      );
+      const approval = await withTimeout(
+        approveSigner(targetAccount.fid, settings.hubSubmitUrl),
+        18_000,
+        "Signer approval is still waiting on the native keychain or hub. Try again, and approve any macOS keychain prompt if one appears.",
+      );
+      setWriteResult(
+        `Submitted signer approval ${approval.hashHex.slice(0, 18)}... for FID ${targetAccount.fid} from ${source}. Checking registration now.`,
+      );
+
+      const registered = await checkSignerReadiness(targetAccount);
+
+      if (!registered) {
+        setWriteResult(
+          `Submitted signer approval ${approval.hashHex.slice(0, 18)}... . Hypersnap may need a moment to index it; check approval again shortly.`,
+        );
+      }
+
+      return registered;
+    } catch (error) {
+      setSignerStatus({
+        state: "unregistered",
+        eventCount: 0,
+        checkedAt: new Date().toISOString(),
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
   async function handleCreateSigner() {
-    await activateLocalSignerForFid(Number(fidInput), "manual setup");
+    const nextAccount = await activateLocalSignerForFid(Number(fidInput), "manual setup");
+    if (custodyIdentity?.hasKey) {
+      await handleApproveSigner(nextAccount, "manual setup");
+    }
   }
 
   async function handleDeleteSigner() {
@@ -666,7 +738,11 @@ function App() {
       const user = await handleResolveCustodyAddress(custody.address);
 
       if (autoCreateSignerFromOwner) {
-        await activateLocalSignerForFid(user.fid, "owner key");
+        const nextAccount = await activateLocalSignerForFid(user.fid, "owner key");
+        if (custody.hasKey) {
+          await handleApproveSigner(nextAccount, "owner key");
+          return;
+        }
       } else {
         setWriteResult(
           `Resolved ${getUserUsername(user)} from local owner key. Custody ${custody.hasKey ? "saved" : "not saved"} in keychain.`,
@@ -688,7 +764,11 @@ function App() {
       const user = await handleResolveCustodyAddress(custody.address);
 
       if (autoCreateSignerFromOwner) {
-        await activateLocalSignerForFid(user.fid, "custody key");
+        const nextAccount = await activateLocalSignerForFid(user.fid, "custody key");
+        if (custody.hasKey) {
+          await handleApproveSigner(nextAccount, "custody key");
+          return;
+        }
       } else {
         setWriteResult(
           `Resolved ${getUserUsername(user)} from custody key. Custody ${custody.hasKey ? "saved" : "not saved"} in keychain.`,
@@ -728,7 +808,7 @@ function App() {
 
     if (signerStatus.state !== "registered") {
       setWriteResult(
-        "Publishing is blocked until this local signer is approved for your FID. Copy the signer public key, approve it from the custody wallet or Farcaster signer flow, then check approval again.",
+        "Publishing is blocked until this local signer is approved for your FID. Use Approve now in the account panel, then Castora will check approval again.",
       );
       return;
     }
@@ -886,6 +966,7 @@ function App() {
             account={account}
             identityPreview={identityPreview}
             signerStatus={signerStatus}
+            onApproveSigner={() => handleApproveSigner(account)}
             onCheckSigner={() => checkSignerReadiness(account)}
             onDeleteSigner={handleDeleteSigner}
             onFocusCompose={() => focusField("compose-text")}
@@ -1568,6 +1649,7 @@ function SessionPanel({
   account,
   identityPreview,
   signerStatus,
+  onApproveSigner,
   onCheckSigner,
   onDeleteSigner,
   onFocusCompose,
@@ -1576,16 +1658,20 @@ function SessionPanel({
   account: DesktopAccount;
   identityPreview: HypersnapUser | null;
   signerStatus: SignerStatus;
+  onApproveSigner: () => Promise<boolean>;
   onCheckSigner: () => Promise<boolean>;
   onDeleteSigner: () => Promise<void>;
   onFocusCompose: () => void;
   setWriteResult: (value: string) => void;
 }) {
-  const [busy, setBusy] = useState<"check" | "delete" | null>(null);
+  const [busy, setBusy] = useState<"approve" | "check" | "delete" | null>(null);
   const displayName = identityPreview ? getUserDisplayName(identityPreview) : `FID ${account.fid}`;
   const username = identityPreview ? getUserUsername(identityPreview) : `fid:${account.fid}`;
 
-  async function run(action: "check" | "delete", callback: () => Promise<unknown>) {
+  async function run(
+    action: "approve" | "check" | "delete",
+    callback: () => Promise<unknown>,
+  ) {
     setBusy(action);
     try {
       await callback();
@@ -1654,6 +1740,7 @@ function SessionPanel({
         <ApprovalGuide
           account={account}
           busy={busy}
+          onApprove={() => run("approve", onApproveSigner)}
           onCheck={() => run("check", onCheckSigner)}
           setWriteResult={setWriteResult}
         />
@@ -1729,11 +1816,13 @@ function SessionPanel({
 function ApprovalGuide({
   account,
   busy,
+  onApprove,
   onCheck,
   setWriteResult,
 }: {
   account: DesktopAccount;
-  busy: "check" | "delete" | null;
+  busy: "approve" | "check" | "delete" | null;
+  onApprove: () => Promise<void>;
   onCheck: () => Promise<void>;
   setWriteResult: (value: string) => void;
 }) {
@@ -1755,9 +1844,9 @@ function ApprovalGuide({
         <div>
           <p className="text-xs font-bold">Approval required</p>
           <p className="mt-1 text-xs font-semibold leading-5 text-amber-900">
-            Castora made a local Ed25519 signer for your FID. Farcaster hubs only
-            accept casts after your account approves that public key through the
-            Key Gateway and it appears in the Key Registry.
+            Castora made a local Ed25519 signer for your FID. Use Approve now
+            to sign a KEY_ADD with your saved owner key and submit it to Hypersnap.
+            macOS may ask for your login keychain password.
           </p>
         </div>
       </div>
@@ -1767,25 +1856,19 @@ function ApprovalGuide({
           <span className="flex h-5 w-5 flex-none items-center justify-center rounded-md bg-white text-[11px] font-bold text-amber-800">
             1
           </span>
-          Copy this signer public key.
+          Castora signs the approval locally from Keychain.
         </li>
         <li className="flex gap-2">
           <span className="flex h-5 w-5 flex-none items-center justify-center rounded-md bg-white text-[11px] font-bold text-amber-800">
             2
           </span>
-          Approve it from the custody wallet or a Farcaster signed-key-request flow.
+          Hypersnap registers this signer for your FID.
         </li>
         <li className="flex gap-2">
           <span className="flex h-5 w-5 flex-none items-center justify-center rounded-md bg-white text-[11px] font-bold text-amber-800">
             3
           </span>
-          Wait for the Key Registry update to confirm on Optimism.
-        </li>
-        <li className="flex gap-2">
-          <span className="flex h-5 w-5 flex-none items-center justify-center rounded-md bg-white text-[11px] font-bold text-amber-800">
-            4
-          </span>
-          Return to Castora and check approval again.
+          Castora checks approval and unlocks publishing.
         </li>
       </ol>
 
@@ -1796,7 +1879,7 @@ function ApprovalGuide({
         </p>
       </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-2">
+      <div className="mt-3 grid grid-cols-3 gap-2">
         <button
           className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-white px-3 text-xs font-bold text-amber-900 hover:bg-amber-100"
           type="button"
@@ -1807,6 +1890,19 @@ function ApprovalGuide({
         </button>
         <button
           className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-ink px-3 text-xs font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+          type="button"
+          disabled={busy !== null}
+          onClick={onApprove}
+        >
+          {busy === "approve" ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+          )}
+          Approve
+        </button>
+        <button
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-amber-200 bg-white px-3 text-xs font-bold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
           type="button"
           disabled={busy !== null}
           onClick={onCheck}
@@ -1821,8 +1917,9 @@ function ApprovalGuide({
       </div>
 
       <p className="mt-3 text-[11px] font-semibold leading-4 text-amber-800">
-        Castora does not yet generate the approval deeplink or submit the Key Gateway
-        transaction for you. Only the public signer key is shared; your custody key stays local.
+        Choose Always Allow in the macOS keychain prompt for this dev build. The
+        owner key and signer key stay in the OS keychain; Castora only submits
+        the signed KEY_ADD message needed to delegate desktop posting.
       </p>
     </div>
   );
@@ -2362,6 +2459,17 @@ function getUserUsername(user: HypersnapUser) {
 
 function castRowId(hash: string) {
   return `cast-row-${hash.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+  });
 }
 
 function isTextEntryActive() {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isSignerRegistered, normalizeBaseUrl, normalizeSignerKey } from "./hypersnap";
+import {
+  isSignerKeyRegistered,
+  isSignerRegistered,
+  normalizeBaseUrl,
+  normalizeSignerKey,
+} from "./hypersnap";
 
 describe("normalizeBaseUrl", () => {
   it("removes trailing slashes without changing the host", () => {
@@ -31,5 +36,10 @@ describe("signer helpers", () => {
         "0xABCD",
       ),
     ).toBe(true);
+  });
+
+  it("matches unified signer key responses", () => {
+    expect(isSignerKeyRegistered(["0xabcd", "0x1234"], "ABCD")).toBe(true);
+    expect(isSignerKeyRegistered(["0x1234"], "ABCD")).toBe(false);
   });
 });

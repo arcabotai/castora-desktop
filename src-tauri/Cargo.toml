@@ -32,3 +32,5 @@ bip32 = "0.5.3"
 bip39 = { version = "2.2.2", features = ["zeroize"] }
 sha3 = "0.10"
 zeroize = "1"
+blake3 = "1"
+libsecp256k1 = "0.6"

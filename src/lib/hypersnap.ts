@@ -42,6 +42,16 @@ export type HypersnapSignerEvent = {
   block_timestamp: number;
 };
 
+export type HypersnapSigner = {
+  fid?: number;
+  key?: string;
+  keyType?: number;
+  source?: string;
+  addedAt?: number;
+  expiresAt?: number;
+  ttl?: number;
+};
+
 type FeedResponse = {
   casts?: HypersnapCast[];
   next?: { cursor?: string | null };
@@ -50,6 +60,13 @@ type FeedResponse = {
 type SignersResponse = {
   events?: HypersnapSignerEvent[];
   next?: { cursor?: string | null };
+};
+
+type SignersByFidResponse = {
+  signers?: HypersnapSigner[];
+  nextPageToken?: string;
+  gaslessSignerCount?: number;
+  gaslessSignerLimit?: number;
 };
 
 type UserResponse = {
@@ -164,12 +181,29 @@ export async function fetchSignerEvents(nodeBaseUrl: string, fid: number) {
   return response.events ?? [];
 }
 
+export async function fetchSignerKeys(nodeBaseUrl: string, fid: number) {
+  const response = await hypersnapGet<SignersByFidResponse>(
+    nodeBaseUrl,
+    "/v1/signersByFid",
+    { fid },
+  );
+
+  return (response.signers ?? [])
+    .map((signer) => signer.key)
+    .filter((key): key is string => typeof key === "string" && key.trim().length > 0);
+}
+
 export function isSignerRegistered(
   signerEvents: HypersnapSignerEvent[],
   publicKeyHex: string,
 ) {
   const expected = normalizeSignerKey(publicKeyHex);
   return signerEvents.some((event) => normalizeSignerKey(event.signer_key) === expected);
+}
+
+export function isSignerKeyRegistered(signerKeys: string[], publicKeyHex: string) {
+  const expected = normalizeSignerKey(publicKeyHex);
+  return signerKeys.some((key) => normalizeSignerKey(key) === expected);
 }
 
 export function normalizeSignerKey(key: string) {
