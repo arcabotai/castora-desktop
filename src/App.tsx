@@ -46,14 +46,12 @@ import {
 } from "./lib/hypersnap";
 import {
   createSigner,
-  deleteCustodyIdentity,
   deleteSigner,
   getAccount,
   getCustodyIdentity,
   getSettings,
   importCustodyFromMnemonic,
   importCustodyPrivateKey,
-  importSigner,
   saveSettings,
   type CustodyIdentity,
   type DesktopAccount,
@@ -75,7 +73,6 @@ const navItems = [
 
 const DRAFTS_STORAGE_KEY = "castora-desktop:drafts";
 const BOOKMARKS_STORAGE_KEY = "castora-desktop:bookmarks";
-const FIRST_CAST_STORAGE_KEY = "castora-desktop:first-cast-complete";
 
 type SignerStatusState = "idle" | "checking" | "registered" | "unregistered" | "error";
 
@@ -93,15 +90,6 @@ type SavedDraft = {
   fid: number | null;
 };
 
-type SetupStepStatus = "done" | "current" | "pending" | "blocked";
-
-type PrimaryOnboardingAction =
-  | { kind: "focus-fid"; label: string; disabled: boolean }
-  | { kind: "create-signer"; label: string; disabled: boolean }
-  | { kind: "check-signer"; label: string; disabled: boolean }
-  | { kind: "focus-compose"; label: string; disabled: boolean }
-  | { kind: "complete"; label: string; disabled: boolean };
-
 type CommandItem = {
   id: string;
   label: string;
@@ -110,6 +98,8 @@ type CommandItem = {
   icon: typeof Home;
   action: () => void | Promise<void>;
 };
+
+type ConnectMode = "phrase" | "key" | "lookup";
 
 const emptySignerStatus: SignerStatus = {
   state: "idle",
@@ -152,7 +142,6 @@ function App() {
   const [custodyAddressInput, setCustodyAddressInput] = useState("");
   const [mnemonicInput, setMnemonicInput] = useState("");
   const [custodyPrivateKeyInput, setCustodyPrivateKeyInput] = useState("");
-  const [privateKeyInput, setPrivateKeyInput] = useState("");
   const [writeResult, setWriteResult] = useState("");
   const [settingsDraft, setSettingsDraft] = useState<DesktopSettings>(DEFAULT_SETTINGS);
   const [signerStatus, setSignerStatus] = useState<SignerStatus>(emptySignerStatus);
@@ -161,16 +150,14 @@ function App() {
   const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>([]);
   const [bookmarkedCastHashes, setBookmarkedCastHashes] = useState<string[]>([]);
   const [selectedCastHash, setSelectedCastHash] = useState<string | null>(null);
-  const [firstCastSubmitted, setFirstCastSubmitted] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [rememberCustodyKey, setRememberCustodyKey] = useState(true);
   const [autoCreateSignerFromOwner, setAutoCreateSignerFromOwner] = useState(true);
+  const [bootstrapped, setBootstrapped] = useState(false);
   const [isPending, startTransition] = useTransition();
 
   const castValidation = useMemo(() => validateCastText(composeText), [composeText]);
   const activeFid = account?.fid ?? settings.selectedFid ?? null;
-  const parsedFidInput = Number(fidInput);
-  const fidCandidate = activeFid ?? (parsedFidInput > 0 ? parsedFidInput : null);
   const selectedCast = useMemo(
     () => casts.find((cast) => cast.hash === selectedCastHash) ?? casts[0] ?? null,
     [casts, selectedCastHash],
@@ -307,10 +294,12 @@ function App() {
       setCustodyIdentity(storedCustody);
       setCustodyAddressInput(storedCustody?.address ?? "");
       setFidInput(storedAccount?.fid ? String(storedAccount.fid) : "");
+      setBootstrapped(true);
     }
 
     bootstrap().catch((error) => {
       setWriteResult(`Startup warning: ${String(error)}`);
+      setBootstrapped(true);
     });
 
     return () => {
@@ -329,10 +318,6 @@ function App() {
     } catch {
       setSavedDrafts([]);
     }
-  }, []);
-
-  useEffect(() => {
-    setFirstCastSubmitted(window.localStorage.getItem(FIRST_CAST_STORAGE_KEY) === "true");
   }, []);
 
   useEffect(() => {
@@ -582,18 +567,6 @@ function App() {
     await activateLocalSignerForFid(Number(fidInput), "manual setup");
   }
 
-  async function handleImportSigner() {
-    const fid = Number(fidInput);
-    const nextAccount = await importSigner(fid, privateKeyInput);
-    const savedSettings = await saveSettings({ ...settings, selectedFid: fid });
-    setAccount(nextAccount);
-    setPrivateKeyInput("");
-    setSettings(savedSettings);
-    setSettingsDraft((current) => ({ ...current, selectedFid: fid }));
-    setWriteResult(`Imported signer for FID ${fid}.`);
-    void checkSignerReadiness(nextAccount, savedSettings.nodeBaseUrl);
-  }
-
   async function handleDeleteSigner() {
     if (!activeFid) return;
     await deleteSigner(activeFid);
@@ -726,13 +699,6 @@ function App() {
     }
   }
 
-  async function handleDeleteCustodyIdentity() {
-    await deleteCustodyIdentity();
-    setCustodyIdentity(null);
-    setCustodyAddressInput("");
-    setWriteResult("Removed local custody identity.");
-  }
-
   async function handleDryRun() {
     if (!activeFid) {
       setWriteResult("Add or import a signer before building a message.");
@@ -775,12 +741,44 @@ function App() {
       text: composeText,
     });
     const result = await submitRawMessage(settings.hubSubmitUrl, signed.encodedMessageHex);
-    if (result.ok) {
-      setFirstCastSubmitted(true);
-      window.localStorage.setItem(FIRST_CAST_STORAGE_KEY, "true");
-    }
     setWriteResult(
       `Submitted ${signed.hashHex.slice(0, 18)}... with HTTP ${result.status}: ${result.body.slice(0, 180)}`,
+    );
+  }
+
+  if (!bootstrapped) {
+    return <AppLoadingScreen />;
+  }
+
+  if (!account) {
+    return (
+      <ConnectAccountScreen
+        autoCreateSignerFromOwner={autoCreateSignerFromOwner}
+        casts={casts}
+        custodyAddressInput={custodyAddressInput}
+        custodyIdentity={custodyIdentity}
+        custodyPrivateKeyInput={custodyPrivateKeyInput}
+        feedStatus={feedStatus}
+        fidInput={fidInput}
+        identityPreview={identityPreview}
+        identitySearchInput={identitySearchInput}
+        mnemonicInput={mnemonicInput}
+        rememberCustodyKey={rememberCustodyKey}
+        writeResult={writeResult}
+        onAutoCreateSignerFromOwnerChange={setAutoCreateSignerFromOwner}
+        onCreateSigner={handleCreateSigner}
+        onCustodyAddressChange={setCustodyAddressInput}
+        onCustodyPrivateKeyChange={setCustodyPrivateKeyInput}
+        onIdentitySearchChange={setIdentitySearchInput}
+        onImportCustodyPrivateKey={handleImportCustodyPrivateKey}
+        onMnemonicChange={setMnemonicInput}
+        onReport={setWriteResult}
+        onRememberCustodyKeyChange={setRememberCustodyKey}
+        onResolveCustodyAddress={handleResolveCustodyAddress}
+        onResolveIdentity={handleResolveIdentity}
+        onResolveMnemonic={handleResolveMnemonic}
+        onSetFidInput={setFidInput}
+      />
     );
   }
 
@@ -882,40 +880,14 @@ function App() {
         </section>
 
         <aside className="scrollbar-subtle h-auto overflow-y-auto bg-slate-50 px-5 py-5 lg:h-screen">
-          <OnboardingPanel
+          <SessionPanel
             account={account}
-            feedStatus={feedStatus}
-            fidCandidate={fidCandidate}
-            firstCastSubmitted={firstCastSubmitted}
+            identityPreview={identityPreview}
             signerStatus={signerStatus}
             onCheckSigner={() => checkSignerReadiness(account)}
-            onCreateSigner={handleCreateSigner}
+            onDeleteSigner={handleDeleteSigner}
             onFocusCompose={() => focusField("compose-text")}
-            onFocusFid={() => focusField("fid")}
-            onReport={setWriteResult}
-          />
-
-          <IdentityResolverPanel
-            autoCreateSignerFromOwner={autoCreateSignerFromOwner}
-            custodyAddressInput={custodyAddressInput}
-            custodyIdentity={custodyIdentity}
-            custodyPrivateKeyInput={custodyPrivateKeyInput}
-            identityPreview={identityPreview}
-            identitySearchInput={identitySearchInput}
-            mnemonicInput={mnemonicInput}
-            rememberCustodyKey={rememberCustodyKey}
-            onAutoCreateSignerFromOwnerChange={setAutoCreateSignerFromOwner}
-            onCustodyAddressChange={setCustodyAddressInput}
-            onCustodyPrivateKeyChange={setCustodyPrivateKeyInput}
-            onDeleteCustodyIdentity={handleDeleteCustodyIdentity}
-            onIdentitySearchChange={setIdentitySearchInput}
-            onMnemonicChange={setMnemonicInput}
-            onRememberCustodyKeyChange={setRememberCustodyKey}
-            onImportCustodyPrivateKey={handleImportCustodyPrivateKey}
-            onResolveCustodyAddress={handleResolveCustodyAddress}
-            onResolveIdentity={handleResolveIdentity}
-            onResolveMnemonic={handleResolveMnemonic}
-            onReport={setWriteResult}
+            setWriteResult={setWriteResult}
           />
 
           <CastDetailPanel
@@ -929,20 +901,6 @@ function App() {
             onReply={() => {
               if (selectedCast) handleStartReply(selectedCast);
             }}
-          />
-
-          <AccountPanel
-            account={account}
-            fidInput={fidInput}
-            privateKeyInput={privateKeyInput}
-            setFidInput={setFidInput}
-            setPrivateKeyInput={setPrivateKeyInput}
-            onCreateSigner={handleCreateSigner}
-            onCheckSigner={() => checkSignerReadiness(account)}
-            onImportSigner={handleImportSigner}
-            onDeleteSigner={handleDeleteSigner}
-            signerStatus={signerStatus}
-            setWriteResult={setWriteResult}
           />
 
           <DraftsPanel
@@ -960,10 +918,10 @@ function App() {
           <div className="mt-4 rounded-md border border-slate-200 bg-white p-4">
             <div className="mb-3 flex items-center gap-2 text-sm font-bold">
               <Feather className="h-4 w-4 text-ember" aria-hidden="true" />
-              Write spike
+              Status
             </div>
             <p className="min-h-20 rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-100">
-              {writeResult || "Create/import a signer, build a signed cast message, then submit only with a test FID first."}
+              {writeResult || "Ready for local drafts, signing checks, and test submits."}
             </p>
           </div>
         </aside>
@@ -974,6 +932,497 @@ function App() {
         onClose={() => setCommandOpen(false)}
       />
     </main>
+  );
+}
+
+function AppLoadingScreen() {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-mist text-slate-950">
+      <div className="flex items-center gap-3 rounded-md border border-slate-200 bg-white px-4 py-3 shadow-sm">
+        <div className="flex h-9 w-9 items-center justify-center rounded-md bg-ink text-snap">
+          <RadioTower className="h-4 w-4" aria-hidden="true" />
+        </div>
+        <div>
+          <p className="text-sm font-bold">Castora</p>
+          <p className="text-xs font-medium text-slate-500">Opening workspace</p>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function ConnectAccountScreen({
+  autoCreateSignerFromOwner,
+  casts,
+  custodyAddressInput,
+  custodyIdentity,
+  custodyPrivateKeyInput,
+  feedStatus,
+  fidInput,
+  identityPreview,
+  identitySearchInput,
+  mnemonicInput,
+  rememberCustodyKey,
+  writeResult,
+  onAutoCreateSignerFromOwnerChange,
+  onCreateSigner,
+  onCustodyAddressChange,
+  onCustodyPrivateKeyChange,
+  onIdentitySearchChange,
+  onImportCustodyPrivateKey,
+  onMnemonicChange,
+  onRememberCustodyKeyChange,
+  onReport,
+  onResolveCustodyAddress,
+  onResolveIdentity,
+  onResolveMnemonic,
+  onSetFidInput,
+}: {
+  autoCreateSignerFromOwner: boolean;
+  casts: HypersnapCast[];
+  custodyAddressInput: string;
+  custodyIdentity: CustodyIdentity | null;
+  custodyPrivateKeyInput: string;
+  feedStatus: "idle" | "loading" | "ready" | "error";
+  fidInput: string;
+  identityPreview: HypersnapUser | null;
+  identitySearchInput: string;
+  mnemonicInput: string;
+  rememberCustodyKey: boolean;
+  writeResult: string;
+  onAutoCreateSignerFromOwnerChange: (value: boolean) => void;
+  onCreateSigner: () => Promise<void>;
+  onCustodyAddressChange: (value: string) => void;
+  onCustodyPrivateKeyChange: (value: string) => void;
+  onIdentitySearchChange: (value: string) => void;
+  onImportCustodyPrivateKey: () => Promise<void>;
+  onMnemonicChange: (value: string) => void;
+  onRememberCustodyKeyChange: (value: boolean) => void;
+  onReport: (message: string) => void;
+  onResolveCustodyAddress: () => Promise<HypersnapUser | undefined>;
+  onResolveIdentity: () => Promise<void>;
+  onResolveMnemonic: () => Promise<void>;
+  onSetFidInput: (value: string) => void;
+}) {
+  const [connectMode, setConnectMode] = useState<ConnectMode>("phrase");
+  const [busyAction, setBusyAction] = useState<
+    "phrase" | "key" | "identity" | "custody" | "signer" | null
+  >(null);
+  const visibleCasts = casts.slice(0, 4);
+  const fidReady = Boolean(identityPreview?.fid || Number(fidInput));
+
+  async function run(
+    action: "phrase" | "key" | "identity" | "custody" | "signer",
+    callback: () => Promise<unknown>,
+  ) {
+    setBusyAction(action);
+    try {
+      await callback();
+    } catch (error) {
+      onReport(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-mist text-slate-950">
+      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[minmax(0,1fr)_430px]">
+        <section className="min-w-0 border-r border-slate-200 bg-white">
+          <header className="flex h-16 items-center justify-between border-b border-slate-200 px-6">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-ink text-snap">
+                <RadioTower className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <div>
+                <p className="text-base font-bold leading-5">Castora</p>
+                <p className="text-xs font-medium text-slate-500">Hypersnap desktop</p>
+              </div>
+            </div>
+            <span
+              className={cn(
+                "rounded-md px-2.5 py-1 text-xs font-bold",
+                feedStatus === "ready"
+                  ? "bg-moss/15 text-emerald-700"
+                  : feedStatus === "error"
+                    ? "bg-amber-100 text-amber-800"
+                    : "bg-snap/15 text-cyan-700",
+              )}
+            >
+              {feedStatus === "ready"
+                ? "Live feed"
+                : feedStatus === "error"
+                  ? "Fallback feed"
+                  : "Connecting"}
+            </span>
+          </header>
+
+          <div className="scrollbar-subtle h-[calc(100vh-4rem)] overflow-y-auto">
+            <section className="border-b border-slate-200 px-6 py-5">
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <h1 className="text-lg font-bold">Home</h1>
+                  <p className="text-xs font-medium text-slate-500">
+                    Connect an account to compose from desktop.
+                  </p>
+                </div>
+                <div className="hidden items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-500 sm:flex">
+                  <Search className="h-4 w-4" aria-hidden="true" />
+                  Search casts, people, channels
+                </div>
+              </div>
+
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-bold">Compose</p>
+                    <p className="text-xs font-medium text-slate-500">No signer selected</p>
+                  </div>
+                  <span className="rounded-md bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-600">
+                    0/320
+                  </span>
+                </div>
+                <div className="min-h-24 rounded-md border border-dashed border-slate-300 bg-white" />
+              </div>
+            </section>
+
+            <ol className="divide-y divide-slate-200">
+              {visibleCasts.map((cast) => (
+                <ConnectFeedPreviewRow key={cast.hash} cast={cast} />
+              ))}
+            </ol>
+          </div>
+        </section>
+
+        <aside className="scrollbar-subtle h-auto overflow-y-auto bg-slate-50 px-5 py-5 lg:h-screen">
+          <section className="rounded-md border border-slate-200 bg-white p-4">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-bold">
+                  <ShieldCheck className="h-4 w-4 text-moss" aria-hidden="true" />
+                  Connect account
+                </div>
+                <p className="mt-1 text-xs font-medium leading-5 text-slate-500">
+                  Local owner key, local desktop signer.
+                </p>
+              </div>
+              <span className="rounded-md bg-snap/10 px-2 py-1 text-xs font-bold text-cyan-800">
+                Private
+              </span>
+            </div>
+
+            <div className="mb-4 grid grid-cols-3 gap-1 rounded-md bg-slate-100 p-1">
+              {[
+                { id: "phrase", label: "Phrase", icon: ShieldAlert },
+                { id: "key", label: "Key", icon: KeyRound },
+                { id: "lookup", label: "FID", icon: UserCheck },
+              ].map((item) => {
+                const Icon = item.icon;
+                const active = connectMode === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    className={cn(
+                      "inline-flex h-9 items-center justify-center gap-2 rounded-md text-xs font-bold transition",
+                      active
+                        ? "bg-white text-slate-950 shadow-sm"
+                        : "text-slate-500 hover:text-slate-800",
+                    )}
+                    type="button"
+                    onClick={() => setConnectMode(item.id as ConnectMode)}
+                  >
+                    <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {connectMode === "phrase" ? (
+              <div>
+                <label className="block text-xs font-bold text-slate-500" htmlFor="first-run-mnemonic">
+                  Recovery phrase
+                </label>
+                <textarea
+                  id="first-run-mnemonic"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  className="mt-1 min-h-28 w-full resize-none rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-snap focus:bg-white"
+                  value={mnemonicInput}
+                  onChange={(event) => onMnemonicChange(event.currentTarget.value)}
+                  placeholder="BIP39 recovery phrase"
+                />
+                <button
+                  className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+                  type="button"
+                  disabled={busyAction !== null || mnemonicInput.trim().split(/\s+/).length < 12}
+                  onClick={() => run("phrase", onResolveMnemonic)}
+                >
+                  {busyAction === "phrase" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                  )}
+                  Connect with phrase
+                </button>
+              </div>
+            ) : null}
+
+            {connectMode === "key" ? (
+              <div>
+                <label className="block text-xs font-bold text-slate-500" htmlFor="first-run-custody-key">
+                  Custody private key
+                </label>
+                <input
+                  id="first-run-custody-key"
+                  autoComplete="off"
+                  className="mt-1 h-10 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-snap focus:bg-white"
+                  value={custodyPrivateKeyInput}
+                  onChange={(event) => onCustodyPrivateKeyChange(event.currentTarget.value)}
+                  placeholder="0x..."
+                  type="password"
+                />
+                <button
+                  className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+                  type="button"
+                  disabled={busyAction !== null || custodyPrivateKeyInput.trim().length < 64}
+                  onClick={() => run("key", onImportCustodyPrivateKey)}
+                >
+                  {busyAction === "key" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                  )}
+                  Connect with key
+                </button>
+              </div>
+            ) : null}
+
+            {connectMode === "lookup" ? (
+              <div>
+                <label className="block text-xs font-bold text-slate-500" htmlFor="first-run-identity">
+                  FID or username
+                </label>
+                <div className="mt-1 flex gap-2">
+                  <input
+                    id="first-run-identity"
+                    className="h-10 min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-snap focus:bg-white"
+                    value={identitySearchInput}
+                    onChange={(event) => onIdentitySearchChange(event.currentTarget.value)}
+                    placeholder="dwr or 3"
+                  />
+                  <button
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-md bg-ink text-white hover:bg-slate-800 disabled:opacity-50"
+                    type="button"
+                    aria-label="Resolve identity"
+                    disabled={busyAction !== null || identitySearchInput.trim().length === 0}
+                    onClick={() => run("identity", onResolveIdentity)}
+                  >
+                    {busyAction === "identity" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Search className="h-4 w-4" aria-hidden="true" />
+                    )}
+                  </button>
+                </div>
+
+                <label className="mt-3 block text-xs font-bold text-slate-500" htmlFor="first-run-custody-address">
+                  Custody address
+                </label>
+                <div className="mt-1 flex gap-2">
+                  <input
+                    id="first-run-custody-address"
+                    className="h-10 min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-snap focus:bg-white"
+                    value={custodyAddressInput}
+                    onChange={(event) => onCustodyAddressChange(event.currentTarget.value)}
+                    placeholder="0x..."
+                  />
+                  <button
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                    type="button"
+                    aria-label="Resolve custody address"
+                    disabled={busyAction !== null || custodyAddressInput.trim().length === 0}
+                    onClick={() => run("custody", onResolveCustodyAddress)}
+                  >
+                    {busyAction === "custody" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Wallet className="h-4 w-4" aria-hidden="true" />
+                    )}
+                  </button>
+                </div>
+
+                <label className="mt-3 block text-xs font-bold text-slate-500" htmlFor="first-run-fid">
+                  Existing FID
+                </label>
+                <input
+                  id="first-run-fid"
+                  className="mt-1 h-10 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-snap focus:bg-white"
+                  inputMode="numeric"
+                  value={fidInput}
+                  onChange={(event) => onSetFidInput(event.currentTarget.value)}
+                  placeholder="12345"
+                />
+                <button
+                  className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+                  type="button"
+                  disabled={busyAction !== null || !fidReady}
+                  onClick={() => run("signer", onCreateSigner)}
+                >
+                  {busyAction === "signer" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                  )}
+                  Create desktop signer
+                </button>
+              </div>
+            ) : null}
+
+            {connectMode !== "lookup" ? (
+              <div className="mt-4 grid gap-2 text-xs font-semibold text-slate-600">
+                <label className="flex items-center gap-2">
+                  <input
+                    className="h-4 w-4 rounded border-slate-300 text-snap focus:ring-snap"
+                    type="checkbox"
+                    checked={rememberCustodyKey}
+                    onChange={(event) => onRememberCustodyKeyChange(event.currentTarget.checked)}
+                  />
+                  Save custody key in Keychain
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    className="h-4 w-4 rounded border-slate-300 text-snap focus:ring-snap"
+                    type="checkbox"
+                    checked={autoCreateSignerFromOwner}
+                    onChange={(event) =>
+                      onAutoCreateSignerFromOwnerChange(event.currentTarget.checked)
+                    }
+                  />
+                  Create desktop signer
+                </label>
+              </div>
+            ) : null}
+
+            {identityPreview ? (
+              <ConnectIdentityPreview user={identityPreview} />
+            ) : custodyIdentity ? (
+              <div className="mt-4 rounded-md bg-slate-50 p-3">
+                <p className="text-xs font-bold text-slate-500">Custody address</p>
+                <p className="mt-1 break-all font-mono text-[11px] leading-4 text-slate-700">
+                  {custodyIdentity.address}
+                </p>
+              </div>
+            ) : null}
+
+            {writeResult ? (
+              <p className="mt-4 rounded-md bg-slate-950 p-3 text-xs font-semibold leading-5 text-slate-100">
+                {writeResult}
+              </p>
+            ) : null}
+          </section>
+
+          <section className="mt-4 rounded-md border border-slate-200 bg-white p-4">
+            <div className="flex items-center gap-2 text-sm font-bold">
+              <ListChecks className="h-4 w-4 text-snap" aria-hidden="true" />
+              Session
+            </div>
+            <ol className="mt-3 space-y-2">
+              <ConnectStep done={Boolean(custodyIdentity)} label="Owner key" />
+              <ConnectStep done={Boolean(identityPreview)} label="Account match" />
+              <ConnectStep done={false} label="Desktop signer" />
+              <ConnectStep done={false} label="Ready to cast" />
+            </ol>
+          </section>
+        </aside>
+      </div>
+    </main>
+  );
+}
+
+function ConnectFeedPreviewRow({ cast }: { cast: HypersnapCast }) {
+  return (
+    <li className="px-6 py-4">
+      <div className="flex gap-3">
+        {cast.author.pfp_url ? (
+          <img
+            className="h-10 w-10 flex-none rounded-md object-cover"
+            src={cast.author.pfp_url}
+            alt=""
+          />
+        ) : (
+          <div className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-ink text-sm font-bold text-snap">
+            {getCastDisplayName(cast).slice(0, 1).toUpperCase()}
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <p className="truncate text-sm font-bold">{getCastDisplayName(cast)}</p>
+            <span className="text-sm font-medium text-slate-500">
+              {getCastUsername(cast)}
+            </span>
+          </div>
+          <p className="mt-1 max-h-24 overflow-hidden text-sm leading-6 text-slate-800">
+            {cast.text || " "}
+          </p>
+          <div className="mt-3 flex gap-5 text-xs font-medium text-slate-500">
+            <span>{cast.replies.count} replies</span>
+            <span>{cast.reactions.likes_count} likes</span>
+            <span>{cast.reactions.recasts_count} recasts</span>
+          </div>
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function ConnectIdentityPreview({ user }: { user: HypersnapUser }) {
+  const displayName = getUserDisplayName(user);
+
+  return (
+    <div className="mt-4 rounded-md bg-slate-50 p-3">
+      <div className="flex items-center gap-3">
+        {user.pfp_url ? (
+          <img className="h-10 w-10 rounded-md object-cover" src={user.pfp_url} alt="" />
+        ) : (
+          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-ink text-sm font-bold text-snap">
+            {displayName.slice(0, 1).toUpperCase()}
+          </div>
+        )}
+        <div className="min-w-0">
+          <p className="truncate text-sm font-bold">{displayName}</p>
+          <p className="truncate text-xs font-medium text-slate-500">
+            {getUserUsername(user)} · FID {user.fid}
+          </p>
+        </div>
+      </div>
+      {user.custody_address ? (
+        <p className="mt-2 break-all font-mono text-[11px] leading-4 text-slate-500">
+          {user.custody_address}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ConnectStep({ done, label }: { done: boolean; label: string }) {
+  return (
+    <li
+      className={cn(
+        "flex items-center gap-2 rounded-md border px-3 py-2 text-xs font-bold",
+        done
+          ? "border-emerald-100 bg-moss/10 text-emerald-700"
+          : "border-slate-100 bg-slate-50 text-slate-500",
+      )}
+    >
+      {done ? (
+        <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+      ) : (
+        <CircleDot className="h-4 w-4" aria-hidden="true" />
+      )}
+      {label}
+    </li>
   );
 }
 
@@ -1113,449 +1562,155 @@ function Composer({
   );
 }
 
-function OnboardingPanel({
+function SessionPanel({
   account,
-  feedStatus,
-  fidCandidate,
-  firstCastSubmitted,
+  identityPreview,
   signerStatus,
   onCheckSigner,
-  onCreateSigner,
+  onDeleteSigner,
   onFocusCompose,
-  onFocusFid,
-  onReport,
+  setWriteResult,
 }: {
-  account: DesktopAccount | null;
-  feedStatus: "idle" | "loading" | "ready" | "error";
-  fidCandidate: number | null;
-  firstCastSubmitted: boolean;
+  account: DesktopAccount;
+  identityPreview: HypersnapUser | null;
   signerStatus: SignerStatus;
   onCheckSigner: () => Promise<boolean>;
-  onCreateSigner: () => Promise<void>;
+  onDeleteSigner: () => Promise<void>;
   onFocusCompose: () => void;
-  onFocusFid: () => void;
-  onReport: (message: string) => void;
+  setWriteResult: (value: string) => void;
 }) {
-  const [busyAction, setBusyAction] = useState<"create" | "check" | null>(null);
-  const steps = [
-    {
-      title: "Live feed",
-      detail:
-        feedStatus === "ready"
-          ? "Hypersnap reads are online."
-          : feedStatus === "error"
-            ? "Using local fallback while the node recovers."
-            : "Connecting to Hypersnap.",
-      done: feedStatus === "ready",
-    },
-    {
-      title: "Existing FID",
-      detail: fidCandidate ? `FID ${fidCandidate} selected.` : "Choose the identity to use.",
-      done: fidCandidate !== null,
-    },
-    {
-      title: "Desktop signer",
-      detail: account?.hasSigner ? "Signer is stored locally." : "Create or import a local signer.",
-      done: Boolean(account?.hasSigner),
-    },
-    {
-      title: "Approval",
-      detail: signerStatus.message,
-      done: signerStatus.state === "registered",
-    },
-    {
-      title: "First cast",
-      detail: firstCastSubmitted ? "First desktop cast sent." : "Write, sign, and submit.",
-      done: firstCastSubmitted,
-    },
-  ];
-  const firstOpenStep = steps.findIndex((step) => !step.done);
-  const completedCount = steps.filter((step) => step.done).length;
-  const primaryAction = getOnboardingPrimaryAction({
-    account,
-    fidCandidate,
-    firstCastSubmitted,
-    signerStatus,
-  });
+  const [busy, setBusy] = useState<"check" | "delete" | null>(null);
+  const displayName = identityPreview ? getUserDisplayName(identityPreview) : `FID ${account.fid}`;
+  const username = identityPreview ? getUserUsername(identityPreview) : `fid:${account.fid}`;
 
-  async function runPrimaryAction() {
-    if (primaryAction.kind === "focus-fid") {
-      onFocusFid();
-      return;
-    }
-
-    if (primaryAction.kind === "focus-compose") {
-      onFocusCompose();
-      return;
-    }
-
-    if (primaryAction.kind === "complete") {
-      onFocusCompose();
-      return;
-    }
-
-    const action = primaryAction.kind === "create-signer" ? "create" : "check";
-    setBusyAction(action);
-
+  async function run(action: "check" | "delete", callback: () => Promise<unknown>) {
+    setBusy(action);
     try {
-      if (primaryAction.kind === "create-signer") {
-        await onCreateSigner();
-      } else {
-        await onCheckSigner();
-      }
+      await callback();
     } catch (error) {
-      onReport(error instanceof Error ? error.message : String(error));
+      setWriteResult(error instanceof Error ? error.message : String(error));
     } finally {
-      setBusyAction(null);
+      setBusy(null);
     }
   }
 
   return (
-    <section className="mb-4 rounded-md border border-slate-200 bg-white p-4">
+    <section className="rounded-md border border-slate-200 bg-white p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-bold">
-            <ListChecks className="h-4 w-4 text-snap" aria-hidden="true" />
-            First cast setup
+            <UserCheck className="h-4 w-4 text-moss" aria-hidden="true" />
+            Account
           </div>
-          <p className="mt-1 text-xs font-medium text-slate-500">
-            {completedCount}/{steps.length} ready
-          </p>
+          <p className="mt-1 truncate text-xs font-medium text-slate-500">{username}</p>
         </div>
         <span
           className={cn(
             "rounded-md px-2 py-1 text-xs font-bold",
-            firstCastSubmitted ? "bg-moss/15 text-emerald-700" : "bg-slate-100 text-slate-600",
+            signerStatusClasses(signerStatus.state),
           )}
         >
-          {firstCastSubmitted ? "Ready" : "Setup"}
+          {signerStatusLabel(signerStatus.state)}
         </span>
       </div>
 
-      <ol className="space-y-2">
-        {steps.map((step, index) => {
-          const status = getSetupStepStatus(step.done, index, firstOpenStep);
-          return (
-            <li
-              key={step.title}
-              className={cn(
-                "flex gap-2 rounded-md border px-3 py-2",
-                setupStepClasses(status),
-              )}
-            >
-              <SetupStepIcon status={status} />
-              <div className="min-w-0">
-                <p className="text-xs font-bold">{step.title}</p>
-                <p className="mt-0.5 text-xs font-medium leading-4 opacity-75">
-                  {step.detail}
-                </p>
-              </div>
-            </li>
-          );
-        })}
-      </ol>
-
-      <button
-        className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
-        type="button"
-        disabled={primaryAction.disabled || busyAction !== null}
-        onClick={runPrimaryAction}
-      >
-        {busyAction ? (
-          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+      <div className="flex items-center gap-3 rounded-md bg-slate-50 p-3">
+        {identityPreview?.pfp_url ? (
+          <img
+            className="h-11 w-11 flex-none rounded-md object-cover"
+            src={identityPreview.pfp_url}
+            alt=""
+          />
         ) : (
-          <ArrowRight className="h-4 w-4" aria-hidden="true" />
+          <div className="flex h-11 w-11 flex-none items-center justify-center rounded-md bg-ink text-sm font-bold text-snap">
+            {displayName.slice(0, 1).toUpperCase()}
+          </div>
         )}
-        {busyAction === "create"
-          ? "Creating..."
-          : busyAction === "check"
-            ? "Checking..."
-            : primaryAction.label}
-      </button>
-    </section>
-  );
-}
-
-function IdentityResolverPanel({
-  autoCreateSignerFromOwner,
-  custodyAddressInput,
-  custodyIdentity,
-  custodyPrivateKeyInput,
-  identityPreview,
-  identitySearchInput,
-  mnemonicInput,
-  rememberCustodyKey,
-  onAutoCreateSignerFromOwnerChange,
-  onCustodyAddressChange,
-  onCustodyPrivateKeyChange,
-  onDeleteCustodyIdentity,
-  onIdentitySearchChange,
-  onImportCustodyPrivateKey,
-  onMnemonicChange,
-  onRememberCustodyKeyChange,
-  onResolveCustodyAddress,
-  onResolveIdentity,
-  onResolveMnemonic,
-  onReport,
-}: {
-  autoCreateSignerFromOwner: boolean;
-  custodyAddressInput: string;
-  custodyIdentity: CustodyIdentity | null;
-  custodyPrivateKeyInput: string;
-  identityPreview: HypersnapUser | null;
-  identitySearchInput: string;
-  mnemonicInput: string;
-  rememberCustodyKey: boolean;
-  onAutoCreateSignerFromOwnerChange: (value: boolean) => void;
-  onCustodyAddressChange: (value: string) => void;
-  onCustodyPrivateKeyChange: (value: string) => void;
-  onDeleteCustodyIdentity: () => Promise<void>;
-  onIdentitySearchChange: (value: string) => void;
-  onImportCustodyPrivateKey: () => Promise<void>;
-  onMnemonicChange: (value: string) => void;
-  onRememberCustodyKeyChange: (value: boolean) => void;
-  onResolveCustodyAddress: () => Promise<HypersnapUser | undefined>;
-  onResolveIdentity: () => Promise<void>;
-  onResolveMnemonic: () => Promise<void>;
-  onReport: (message: string) => void;
-}) {
-  const [busyAction, setBusyAction] = useState<
-    "identity" | "custody" | "mnemonic" | "custody-key" | "delete-custody" | null
-  >(null);
-  const displayName = identityPreview ? getUserDisplayName(identityPreview) : "";
-  const username = identityPreview ? getUserUsername(identityPreview) : "";
-  const avatarLetter = displayName.slice(0, 1).toUpperCase();
-
-  async function run(
-    action: "identity" | "custody" | "mnemonic" | "custody-key" | "delete-custody",
-    callback: () => Promise<unknown>,
-  ) {
-    setBusyAction(action);
-    try {
-      await callback();
-    } catch (error) {
-      onReport(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
-  return (
-    <section className="mt-4 rounded-md border border-slate-200 bg-white p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-sm font-bold">
-          <UserCheck className="h-4 w-4 text-moss" aria-hidden="true" />
-          Identity
+        <div className="min-w-0">
+          <p className="truncate text-sm font-bold">{displayName}</p>
+          <p className="truncate text-xs font-semibold text-slate-500">FID {account.fid}</p>
         </div>
-        {identityPreview ? (
-          <span className="rounded-md bg-moss/15 px-2 py-1 text-xs font-bold text-emerald-700">
-            FID {identityPreview.fid}
-          </span>
-        ) : null}
       </div>
 
-      <label className="block text-xs font-bold text-slate-500" htmlFor="identity-search">
-        FID or username
-      </label>
-      <div className="mt-1 flex gap-2">
-        <input
-          id="identity-search"
-          className="h-9 min-w-0 flex-1 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-snap"
-          value={identitySearchInput}
-          onChange={(event) => onIdentitySearchChange(event.currentTarget.value)}
-          placeholder="dwr or 3"
-        />
+      <div
+        className={cn(
+          "mt-3 flex items-start gap-2 rounded-md px-3 py-2 text-xs font-semibold",
+          signerStatusClasses(signerStatus.state),
+        )}
+      >
+        {signerStatus.state === "checking" ? (
+          <Loader2 className="mt-0.5 h-4 w-4 flex-none animate-spin" aria-hidden="true" />
+        ) : signerStatus.state === "registered" ? (
+          <CheckCircle2 className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />
+        ) : (
+          <AlertCircle className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />
+        )}
+        <p className="leading-5">{signerStatus.message}</p>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
         <button
-          className="inline-flex h-9 items-center justify-center rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800"
           type="button"
-          disabled={busyAction !== null || identitySearchInput.trim().length === 0}
-          onClick={() => run("identity", onResolveIdentity)}
+          onClick={onFocusCompose}
         >
-          {busyAction === "identity" ? (
+          <Feather className="h-4 w-4" aria-hidden="true" />
+          Compose
+        </button>
+        <button
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+          type="button"
+          disabled={busy !== null || signerStatus.state === "checking"}
+          onClick={() => run("check", onCheckSigner)}
+        >
+          {busy === "check" || signerStatus.state === "checking" ? (
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
           ) : (
-            <Search className="h-4 w-4" aria-hidden="true" />
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />
           )}
+          Approval
         </button>
       </div>
 
-      <label className="mt-3 block text-xs font-bold text-slate-500" htmlFor="custody-address">
-        Custody address
-      </label>
-      <div className="mt-1 flex gap-2">
-        <input
-          id="custody-address"
-          className="h-9 min-w-0 flex-1 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-snap"
-          value={custodyAddressInput}
-          onChange={(event) => onCustodyAddressChange(event.currentTarget.value)}
-          placeholder="0x..."
-        />
-        <button
-          className="inline-flex h-9 items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-          type="button"
-          disabled={busyAction !== null || custodyAddressInput.trim().length === 0}
-          onClick={() => run("custody", onResolveCustodyAddress)}
-        >
-          {busyAction === "custody" ? (
-            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-          ) : (
-            <Wallet className="h-4 w-4" aria-hidden="true" />
-          )}
-        </button>
-      </div>
-
-      <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
-            <ShieldCheck className="h-4 w-4 text-moss" aria-hidden="true" />
-            Owner key
-          </div>
-          {custodyIdentity ? (
-            <span
-              className={cn(
-                "rounded-md px-2 py-1 text-[11px] font-bold",
-                custodyIdentity.hasKey
-                  ? "bg-moss/15 text-emerald-700"
-                  : "bg-amber-100 text-amber-800",
-              )}
-            >
-              {custodyIdentity.hasKey ? "Keychain" : "Address only"}
-            </span>
-          ) : null}
-        </div>
-
-        <label className="block text-xs font-bold text-slate-500" htmlFor="mnemonic">
-          Recovery phrase
-        </label>
-        <textarea
-          id="mnemonic"
-          className="mt-1 min-h-16 w-full resize-none rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-snap"
-          value={mnemonicInput}
-          onChange={(event) => onMnemonicChange(event.currentTarget.value)}
-          placeholder="BIP39 recovery phrase"
-        />
-
-        <label className="mt-3 block text-xs font-bold text-slate-500" htmlFor="custody-key">
-          Custody private key
-        </label>
-        <input
-          id="custody-key"
-          className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none focus:border-snap"
-          value={custodyPrivateKeyInput}
-          onChange={(event) => onCustodyPrivateKeyChange(event.currentTarget.value)}
-          placeholder="0x..."
-          type="password"
-        />
-
-        <div className="mt-3 grid gap-2 text-xs font-semibold text-slate-600">
-          <label className="flex items-center gap-2">
-            <input
-              className="h-4 w-4 rounded border-slate-300 text-snap focus:ring-snap"
-              type="checkbox"
-              checked={rememberCustodyKey}
-              onChange={(event) => onRememberCustodyKeyChange(event.currentTarget.checked)}
-            />
-            Save derived custody key in Keychain
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              className="h-4 w-4 rounded border-slate-300 text-snap focus:ring-snap"
-              type="checkbox"
-              checked={autoCreateSignerFromOwner}
-              onChange={(event) =>
-                onAutoCreateSignerFromOwnerChange(event.currentTarget.checked)
+      <div className="mt-3 flex items-center justify-between gap-2 rounded-md bg-slate-50 p-2">
+        <p className="min-w-0 truncate font-mono text-[11px] text-slate-600">
+          {account.publicKeyHex}
+        </p>
+        <div className="flex gap-1">
+          <button
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
+            type="button"
+            aria-label="Copy signer public key"
+            title="Copy signer public key"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(account.publicKeyHex);
+                setWriteResult("Copied signer public key.");
+              } catch (error) {
+                setWriteResult(
+                  error instanceof Error ? error.message : "Unable to copy signer key.",
+                );
               }
-            />
-            Create desktop signer after match
-          </label>
-        </div>
-
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <button
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 text-sm font-bold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
-            type="button"
-            disabled={busyAction !== null || mnemonicInput.trim().split(/\s+/).length < 12}
-            onClick={() => run("mnemonic", onResolveMnemonic)}
+            }}
           >
-            {busyAction === "mnemonic" ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <ShieldAlert className="h-4 w-4" aria-hidden="true" />
-            )}
-            Import phrase
+            <Copy className="h-4 w-4" aria-hidden="true" />
           </button>
           <button
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50 disabled:opacity-50"
             type="button"
-            disabled={busyAction !== null || custodyPrivateKeyInput.trim().length < 64}
-            onClick={() => run("custody-key", onImportCustodyPrivateKey)}
+            aria-label="Delete local signer"
+            title="Delete local signer"
+            disabled={busy !== null}
+            onClick={() => run("delete", onDeleteSigner)}
           >
-            {busyAction === "custody-key" ? (
+            {busy === "delete" ? (
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
             ) : (
-              <KeyRound className="h-4 w-4" aria-hidden="true" />
+              <Trash2 className="h-4 w-4" aria-hidden="true" />
             )}
-            Import key
           </button>
         </div>
-
-        {custodyIdentity ? (
-          <div className="mt-3 rounded-md bg-white p-3">
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-xs font-bold text-slate-500">Resolved custody</p>
-                <p className="mt-1 break-all font-mono text-[11px] leading-4 text-slate-700">
-                  {custodyIdentity.address}
-                </p>
-                <p className="mt-1 break-all font-mono text-[11px] leading-4 text-slate-500">
-                  {custodyIdentity.derivationPath}
-                </p>
-              </div>
-              <button
-                className="inline-flex h-8 w-8 flex-none items-center justify-center rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50 disabled:opacity-50"
-                type="button"
-                aria-label="Delete custody identity"
-                title="Delete custody identity"
-                disabled={busyAction !== null}
-                onClick={() => run("delete-custody", onDeleteCustodyIdentity)}
-              >
-                {busyAction === "delete-custody" ? (
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                ) : (
-                  <Trash2 className="h-4 w-4" aria-hidden="true" />
-                )}
-              </button>
-            </div>
-          </div>
-        ) : null}
       </div>
-
-      {identityPreview ? (
-        <div className="mt-3 rounded-md bg-slate-50 p-3">
-          <div className="flex gap-3">
-            {identityPreview.pfp_url ? (
-              <img
-                className="h-10 w-10 flex-none rounded-md object-cover"
-                src={identityPreview.pfp_url}
-                alt=""
-              />
-            ) : (
-              <div className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-ink text-sm font-bold text-snap">
-                {avatarLetter}
-              </div>
-            )}
-            <div className="min-w-0">
-              <p className="truncate text-sm font-bold">{displayName}</p>
-              <p className="truncate text-xs font-medium text-slate-500">{username}</p>
-            </div>
-          </div>
-          {identityPreview.custody_address ? (
-            <p className="mt-2 break-all font-mono text-[11px] leading-4 text-slate-500">
-              {identityPreview.custody_address}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -1873,179 +2028,6 @@ function CastDetailPanel({
   );
 }
 
-function AccountPanel({
-  account,
-  fidInput,
-  privateKeyInput,
-  setFidInput,
-  setPrivateKeyInput,
-  onCreateSigner,
-  onCheckSigner,
-  onImportSigner,
-  onDeleteSigner,
-  signerStatus,
-  setWriteResult,
-}: {
-  account: DesktopAccount | null;
-  fidInput: string;
-  privateKeyInput: string;
-  setFidInput: (value: string) => void;
-  setPrivateKeyInput: (value: string) => void;
-  onCreateSigner: () => Promise<void>;
-  onCheckSigner: () => Promise<boolean>;
-  onImportSigner: () => Promise<void>;
-  onDeleteSigner: () => Promise<void>;
-  signerStatus: SignerStatus;
-  setWriteResult: (value: string) => void;
-}) {
-  const [busy, setBusy] = useState<"create" | "import" | "delete" | "check" | null>(
-    null,
-  );
-
-  async function run(
-    action: "create" | "import" | "delete" | "check",
-    callback: () => Promise<unknown>,
-  ) {
-    setBusy(action);
-    try {
-      await callback();
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <section className="rounded-md border border-slate-200 bg-white p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="flex items-center gap-2 text-sm font-bold">
-          <KeyRound className="h-4 w-4 text-snap" aria-hidden="true" />
-          Account
-        </div>
-        {account ? (
-          <span className="inline-flex items-center gap-1 rounded-md bg-moss/15 px-2 py-1 text-xs font-bold text-emerald-700">
-            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-            FID {account.fid}
-          </span>
-        ) : null}
-      </div>
-
-      <div
-        className={cn(
-          "mb-3 flex items-start gap-2 rounded-md px-3 py-2 text-xs font-semibold",
-          signerStatusClasses(signerStatus.state),
-        )}
-      >
-        {signerStatus.state === "registered" ? (
-          <CheckCircle2 className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />
-        ) : signerStatus.state === "checking" ? (
-          <Loader2 className="mt-0.5 h-4 w-4 flex-none animate-spin" aria-hidden="true" />
-        ) : (
-          <AlertCircle className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />
-        )}
-        <div>
-          <p>{signerStatusLabel(signerStatus.state)}</p>
-          <p className="mt-0.5 font-medium opacity-80">{signerStatus.message}</p>
-        </div>
-      </div>
-
-      <label className="block text-xs font-bold text-slate-500" htmlFor="fid">
-        Existing FID
-      </label>
-      <input
-        id="fid"
-        className="mt-1 h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-snap"
-        inputMode="numeric"
-        value={fidInput}
-        onChange={(event) => setFidInput(event.currentTarget.value)}
-        placeholder="12345"
-      />
-
-      <label className="mt-3 block text-xs font-bold text-slate-500" htmlFor="signer-key">
-        Import signer seed hex
-      </label>
-      <input
-        id="signer-key"
-        className="mt-1 h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-snap"
-        value={privateKeyInput}
-        onChange={(event) => setPrivateKeyInput(event.currentTarget.value)}
-        placeholder="0x..."
-        type="password"
-      />
-
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <button
-          className="h-9 rounded-md bg-ink px-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50"
-          type="button"
-          disabled={busy !== null || !Number(fidInput)}
-          onClick={() => run("create", onCreateSigner)}
-        >
-          {busy === "create" ? "Creating..." : "Create signer"}
-        </button>
-        <button
-          className="h-9 rounded-md border border-slate-300 bg-white px-3 text-sm font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-          type="button"
-          disabled={busy !== null || !Number(fidInput) || privateKeyInput.length < 32}
-          onClick={() => run("import", onImportSigner)}
-        >
-          {busy === "import" ? "Importing..." : "Import"}
-        </button>
-      </div>
-
-      {account ? (
-        <div className="mt-3 rounded-md bg-slate-50 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-xs font-bold text-slate-500">Signer public key</p>
-            <div className="flex gap-1">
-              <button
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-50"
-                type="button"
-                aria-label="Copy signer public key"
-                title="Copy signer public key"
-                disabled={busy !== null}
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(account.publicKeyHex);
-                    setWriteResult("Copied signer public key.");
-                  } catch (error) {
-                    setWriteResult(
-                      error instanceof Error ? error.message : "Unable to copy signer key.",
-                    );
-                  }
-                }}
-              >
-                <Copy className="h-4 w-4" aria-hidden="true" />
-              </button>
-              <button
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-50"
-                type="button"
-                aria-label="Check signer approval"
-                title="Check signer approval"
-                disabled={busy !== null || signerStatus.state === "checking"}
-                onClick={() => run("check", onCheckSigner)}
-              >
-                {busy === "check" || signerStatus.state === "checking" ? (
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                ) : (
-                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
-                )}
-              </button>
-            </div>
-          </div>
-          <p className="mt-1 break-all font-mono text-xs text-slate-700">{account.publicKeyHex}</p>
-          <button
-            className="mt-3 h-8 rounded-md border border-red-200 bg-white px-3 text-xs font-bold text-red-700 hover:bg-red-50"
-            type="button"
-            disabled={busy !== null}
-            onClick={() => run("delete", onDeleteSigner)}
-          >
-            Delete local signer
-          </button>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
 function DraftsPanel({
   drafts,
   onDeleteDraft,
@@ -2162,81 +2144,6 @@ function SettingsPanel({
       </button>
     </section>
   );
-}
-
-function SetupStepIcon({ status }: { status: SetupStepStatus }) {
-  if (status === "done") {
-    return <CheckCircle2 className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />;
-  }
-
-  if (status === "current") {
-    return <CircleDot className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />;
-  }
-
-  if (status === "blocked") {
-    return <AlertCircle className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />;
-  }
-
-  return <CircleDot className="mt-0.5 h-4 w-4 flex-none" aria-hidden="true" />;
-}
-
-function getSetupStepStatus(
-  done: boolean,
-  index: number,
-  firstOpenStep: number,
-): SetupStepStatus {
-  if (done) return "done";
-  if (index === firstOpenStep) return "current";
-  if (firstOpenStep === -1 || index < firstOpenStep) return "pending";
-  return "blocked";
-}
-
-function setupStepClasses(status: SetupStepStatus) {
-  switch (status) {
-    case "done":
-      return "border-emerald-100 bg-moss/10 text-emerald-700";
-    case "current":
-      return "border-cyan-100 bg-snap/10 text-cyan-800";
-    case "blocked":
-      return "border-slate-100 bg-slate-50 text-slate-400";
-    case "pending":
-    default:
-      return "border-slate-100 bg-slate-50 text-slate-600";
-  }
-}
-
-function getOnboardingPrimaryAction({
-  account,
-  fidCandidate,
-  firstCastSubmitted,
-  signerStatus,
-}: {
-  account: DesktopAccount | null;
-  fidCandidate: number | null;
-  firstCastSubmitted: boolean;
-  signerStatus: SignerStatus;
-}): PrimaryOnboardingAction {
-  if (!fidCandidate) {
-    return { kind: "focus-fid", label: "Enter existing FID", disabled: false };
-  }
-
-  if (!account?.hasSigner) {
-    return { kind: "create-signer", label: "Create local signer", disabled: false };
-  }
-
-  if (signerStatus.state !== "registered") {
-    return {
-      kind: "check-signer",
-      label: signerStatus.state === "checking" ? "Checking approval" : "Check approval",
-      disabled: signerStatus.state === "checking",
-    };
-  }
-
-  if (!firstCastSubmitted) {
-    return { kind: "focus-compose", label: "Compose first cast", disabled: false };
-  }
-
-  return { kind: "complete", label: "Write another cast", disabled: false };
 }
 
 function signerStatusLabel(state: SignerStatusState) {
